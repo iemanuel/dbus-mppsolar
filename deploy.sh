@@ -237,33 +237,28 @@ configure_serial_starter() {
     fi
 }
 
-# Install Python dependencies
-install_dependencies() {
-    log "Installing Python dependencies..."
+# Check Python dependencies (no pip installations)
+check_dependencies() {
+    log "Checking Python dependencies..."
     
-    # Check if mpp-solar is already installed
-    if python3 -c "import mppsolar" 2>/dev/null; then
-        log "mpp-solar is already installed"
-    else
-        log "Installing mpp-solar..."
-        pip3 install mppsolar
-    fi
+    # Note: We don't install packages via pip since they often fail to build on embedded systems
+    # Instead, we use the included modules from the repository submodules
     
-    # Note: dbus-python and PyGObject often fail to build on embedded systems
-    # They may already be available system-wide, or we'll use the included versions
     log "Checking for system dbus-python..."
     if python3 -c "import dbus" 2>/dev/null; then
         log "✓ System dbus-python is available"
     else
-        warn "System dbus-python not found - may need manual installation"
+        log "System dbus-python not found - will use included version"
     fi
     
     log "Checking for system PyGObject..."
     if python3 -c "import gi" 2>/dev/null; then
         log "✓ System PyGObject is available"
     else
-        warn "System PyGObject not found - may need manual installation"
+        log "System PyGObject not found - will use included version"
     fi
+    
+    log "Note: Using included mpp-solar and velib_python modules from repository"
 }
 
 # Set permissions and Python path
@@ -429,7 +424,7 @@ main() {
     
     # Optional steps (won't fail installation)
     configure_serial_starter || warn "Serial starter configuration failed - may need manual setup"
-    install_dependencies || warn "Some dependencies may need manual installation"
+    check_dependencies || warn "Dependency check failed - check manually"
     
     # Test what we can
     test_installation || warn "Installation test failed - check manually"
