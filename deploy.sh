@@ -70,10 +70,26 @@ check_requirements() {
         log "Git is already installed"
     fi
     
-    # Check if velib_python exists
-    if [[ ! -d "/opt/victronenergy/velib_python" ]]; then
-        error "velib_python is not found. This is required for dbus-mppsolar to work."
-        exit 1
+    # Check if velib_python exists in system (optional check)
+    # Note: velib_python is included as a submodule in this repository
+    VELIB_PYTHON_FOUND=false
+    VELIB_PYTHON_PATHS=(
+        "/opt/victronenergy/velib_python"
+        "/opt/victronenergy/venus-gw/velib_python"
+        "/opt/victronenergy/venus-os/velib_python"
+        "/opt/victronenergy/venus/velib_python"
+    )
+    
+    for path in "${VELIB_PYTHON_PATHS[@]}"; do
+        if [[ -d "$path" ]]; then
+            log "Found system velib_python at: $path"
+            VELIB_PYTHON_FOUND=true
+            break
+        fi
+    done
+    
+    if [[ "$VELIB_PYTHON_FOUND" == false ]]; then
+        log "System velib_python not found - will use the one included in the repository"
     fi
 }
 
@@ -91,18 +107,53 @@ backup_existing() {
 clone_repository() {
     log "Cloning repository from $REPO_URL"
     
+    # Check network connectivity to GitHub
+    log "Checking network connectivity to GitHub..."
+    if ! ping -c 1 github.com &> /dev/null; then
+        error "Cannot reach GitHub. Please check your internet connection."
+        exit 1
+    fi
+    log "✓ Network connectivity to GitHub confirmed"
+    
     # Remove existing directory if it exists
     if [[ -d "$INSTALL_DIR" ]]; then
+        log "Removing existing installation directory"
         rm -rf "$INSTALL_DIR"
     fi
     
-    # Clone with submodules
-    git clone --recurse-submodules "$REPO_URL" "$INSTALL_DIR"
+    # Create parent directory if it doesn't exist
+    mkdir -p "$(dirname "$INSTALL_DIR")"
     
-    if [[ $? -eq 0 ]]; then
+    # Clone with submodules
+    log "Cloning repository (this may take a few minutes)..."
+    if git clone --recurse-submodules "$REPO_URL" "$INSTALL_DIR"; then
         log "Repository cloned successfully"
+        
+        # Verify the clone
+        if [[ -d "$INSTALL_DIR" ]] && [[ -f "$INSTALL_DIR/dbus-mppsolar.py" ]]; then
+            log "✓ Main script found: $INSTALL_DIR/dbus-mppsolar.py"
+        else
+            error "Repository cloned but main script not found"
+            exit 1
+        fi
+        
+        # Check if velib_python submodule was cloned
+        if [[ -d "$INSTALL_DIR/velib_python" ]]; then
+            log "✓ velib_python submodule found"
+        else
+            warn "velib_python submodule not found - this may cause issues"
+        fi
+        
+        # Check if mpp-solar submodule was cloned
+        if [[ -d "$INSTALL_DIR/mpp-solar" ]]; then
+            log "✓ mpp-solar submodule found"
+        else
+            warn "mpp-solar submodule not found - this may cause issues"
+        fi
+        
     else
         error "Failed to clone repository"
+        error "Please check your internet connection and GitHub accessibility"
         exit 1
     fi
 }
