@@ -31,8 +31,8 @@ def test_pi18sv_protocol():
         print(f"  ✓ Protocol class created: {type(protocol).__name__}")
         
         # Test protocol identification
-        print(f"  ✓ Protocol name: {protocol.name}")
-        print(f"  ✓ Protocol description: {protocol.description}")
+        print(f"  ✓ Protocol ID: {protocol._protocol_id}")
+        print(f"  ✓ Protocol string: {str(protocol)}")
         
         # Test command definitions
         print("\n📋 Testing command definitions...")
@@ -62,17 +62,20 @@ def test_pi18sv_protocol():
         # Test specific EASUN InfiniSolar V functionality
         print("\n🏭 Testing EASUN InfiniSolar V specific features...")
         
-        # Test if it supports 3-phase parallel systems
-        if hasattr(protocol, 'supports_parallel'):
-            print(f"  ✓ Parallel support: {protocol.supports_parallel}")
-        else:
-            print("  ⚠️ Parallel support attribute not found")
-            
-        # Test if it supports 3-phase systems
-        if hasattr(protocol, 'supports_3phase'):
-            print(f"  ✓ 3-phase support: {protocol.supports_3phase}")
-        else:
-            print("  ⚠️ 3-phase support attribute not found")
+        # Test PI18SV specific attributes
+        print(f"  ✓ Protocol ID: {protocol._protocol_id}")
+        print(f"  ✓ Inherits from: {protocol.__class__.__bases__[0].__name__}")
+        
+        # Test if it has the extended command set
+        extended_commands = ['POP', 'BUCD', 'DAT']
+        available_extended = [cmd for cmd in extended_commands if cmd in protocol.COMMANDS]
+        print(f"  ✓ Extended commands available: {available_extended}")
+        
+        # Test status and settings commands
+        if hasattr(protocol, 'STATUS_COMMANDS'):
+            print(f"  ✓ Status commands: {len(protocol.STATUS_COMMANDS)} available")
+        if hasattr(protocol, 'SETTINGS_COMMANDS'):
+            print(f"  ✓ Settings commands: {len(protocol.SETTINGS_COMMANDS)} available")
             
         # Test command parsing
         print("\n🔍 Testing command parsing...")
@@ -88,12 +91,14 @@ def test_pi18sv_protocol():
         except Exception as e:
             print(f"  ✗ Command parsing test failed: {e}")
             
-        # Test protocol version
+        # Test protocol information
         print("\n📊 Protocol Information:")
-        print(f"  • Protocol: {protocol.name}")
-        print(f"  • Version: {getattr(protocol, 'version', 'Unknown')}")
-        print(f"  • Description: {getattr(protocol, 'description', 'Unknown')}")
+        print(f"  • Protocol ID: {protocol._protocol_id}")
+        print(f"  • String representation: {str(protocol)}")
         print(f"  • Commands: {len(protocol.COMMANDS) if hasattr(protocol, 'COMMANDS') else 'Unknown'}")
+        print(f"  • Status Commands: {len(protocol.STATUS_COMMANDS) if hasattr(protocol, 'STATUS_COMMANDS') else 'Unknown'}")
+        print(f"  • Settings Commands: {len(protocol.SETTINGS_COMMANDS) if hasattr(protocol, 'SETTINGS_COMMANDS') else 'Unknown'}")
+        print(f"  • Default Command: {protocol.DEFAULT_COMMAND if hasattr(protocol, 'DEFAULT_COMMAND') else 'Unknown'}")
         
         print("\n✅ PI18SV Protocol Test Completed Successfully!")
         return True
@@ -141,11 +146,15 @@ def test_mpp_solar():
         print("  ✓ mppsolar module is accessible")
         
         # Test available protocols
-        if hasattr(mppsolar, 'protocols'):
-            protocols = mppsolar.protocols
-            print(f"  ✓ Available protocols: {list(protocols.keys())}")
-        else:
-            print("  ⚠️ Protocols attribute not found")
+        try:
+            # Try to import protocols module
+            from mppsolar import protocols
+            protocol_list = [name for name in dir(protocols) if not name.startswith('_') and name != 'AbstractProtocol']
+            print(f"  ✓ Available protocols: {protocol_list}")
+        except ImportError:
+            print("  ⚠️ Protocols module not directly accessible")
+        except Exception as e:
+            print(f"  ⚠️ Protocol listing failed: {e}")
             
         return True
         
