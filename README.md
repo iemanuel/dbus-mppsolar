@@ -28,7 +28,7 @@ pip3 instal mpp-solar # Not needed because this repo uses it as a submodule
 ## Clone GIT & submodules on Venus OS:
 
 ```
-git clone --recurse-submodules https://github.com/DarkZeros/dbus-mppsolar /data/etc/dbus-mppsolar
+git clone --recurse-submodules https://github.com/iemanuel/dbus-mppsolar /data/etc/dbus-mppsolar
 ```
 
 Now install the service to the VenusOS to allow starting it when needed:
@@ -56,5 +56,7 @@ alias   default         mppsolar:gps:vedirect
 
 # What inverters are supported?
 
-  * Inverters that follow the PI30 protocol, or PI30MAX
-  * The rest, are not yet parsed, but feel free to implement the update()/change() functions for them :)
+  * **PI30/PI30MAX**: Standard MPP Solar protocol inverters
+  * **PI17**: Older MPP Solar protocol inverters  
+  * **PI18SV**: P18 InfiniSolar V series inverters (newly added)
+  * Other protocols are not yet fully implemented, but feel free to contribute additional protocol support!
