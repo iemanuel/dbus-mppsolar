@@ -93,28 +93,36 @@ check_requirements() {
     fi
 }
 
-# Backup existing installation
-backup_existing() {
+# Clean installation - always fresh install
+clean_installation() {
+    log "Performing clean installation..."
+    
+    # Remove any existing installation completely
     if [[ -d "$INSTALL_DIR" ]]; then
-        log "Existing installation found - this appears to be an update"
-        
-        # Check if it's a git repository
-        if [[ -d "$INSTALL_DIR/.git" ]]; then
-            log "Git repository detected - checking current version..."
-            cd "$INSTALL_DIR"
-            CURRENT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-            CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
-            log "Current version: $CURRENT_BRANCH at $CURRENT_COMMIT"
-            cd - > /dev/null
-        fi
-        
-        log "Backing up existing installation to $BACKUP_DIR"
-        mkdir -p "$BACKUP_DIR"
-        cp -R "$INSTALL_DIR"/* "$BACKUP_DIR/"
-        log "Backup completed"
-    else
-        log "Fresh installation - no backup needed"
+        log "Removing existing installation directory: $INSTALL_DIR"
+        rm -rf "$INSTALL_DIR"
+        log "✓ Existing installation removed"
     fi
+    
+    # Remove any existing service files
+    if [[ -d "$SERVICE_TEMPLATE_DIR" ]]; then
+        log "Removing existing service files: $SERVICE_TEMPLATE_DIR"
+        rm -rf "$SERVICE_TEMPLATE_DIR"
+        log "✓ Existing service files removed"
+    fi
+    
+    # Clean up any leftover Python path files
+    PYTHON_SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "")
+    if [[ -n "$PYTHON_SITE_PACKAGES" ]] && [[ -d "$PYTHON_SITE_PACKAGES" ]]; then
+        PYTHON_PATH_FILE="$PYTHON_SITE_PACKAGES/dbus-mppsolar.pth"
+        if [[ -f "$PYTHON_PATH_FILE" ]]; then
+            log "Removing existing Python path file: $PYTHON_PATH_FILE"
+            rm -f "$PYTHON_PATH_FILE"
+            log "✓ Python path file removed"
+        fi
+    fi
+    
+    log "✓ Clean installation ready"
 }
 
 # Clone repository with submodules
@@ -152,17 +160,19 @@ clone_repository() {
         fi
         
         # Check if velib_python submodule was cloned
-        if [[ -d "$INSTALL_DIR/velib_python" ]]; then
-            log "✓ velib_python submodule found"
+        if [[ -d "$INSTALL_DIR/velib_python" ]] && [[ "$(ls -A "$INSTALL_DIR/velib_python")" ]]; then
+            log "✓ velib_python submodule found and populated"
         else
-            warn "velib_python submodule not found - this may cause issues"
+            error "velib_python submodule is empty or missing - cloning failed"
+            exit 1
         fi
         
         # Check if mpp-solar submodule was cloned
-        if [[ -d "$INSTALL_DIR/mpp-solar" ]]; then
-            log "✓ mpp-solar submodule found"
+        if [[ -d "$INSTALL_DIR/mpp-solar" ]] && [[ "$(ls -A "$INSTALL_DIR/mpp-solar")" ]]; then
+            log "✓ mpp-solar submodule found and populated"
         else
-            warn "mpp-solar submodule not found - this may cause issues"
+            error "mpp-solar submodule is empty or missing - cloning failed"
+            exit 1
         fi
         
     else
@@ -417,7 +427,7 @@ main() {
     check_venusos
     
     # Core installation steps
-    backup_existing
+    clean_installation
     clone_repository
     install_service
     set_permissions
