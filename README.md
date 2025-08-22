@@ -58,5 +58,9 @@ alias   default         mppsolar:gps:vedirect
 
   * **PI30/PI30MAX**: Standard MPP Solar protocol inverters
   * **PI17**: Older MPP Solar protocol inverters  
-  * **PI18SV**: P18 InfiniSolar V series inverters (newly added)
+  * **PI18SV**: P18 InfiniSolar V series inverters with **3-phase parallel support** (newly added)
+    - ✅ Single phase inverters
+    - ✅ Parallel inverters (single phase)  
+    - ✅ 3-phase systems (Phase 1, 2, 3 of three phase output)
+    - ✅ Automatic detection of parallel/3-phase configuration
   * Other protocols are not yet fully implemented, but feel free to contribute additional protocol support!
