@@ -957,55 +957,60 @@ class DbusMppSolarService(object):
                 m['/State'] = 0  # Off
             v['/State'] = m['/State']
 
-                                def convert_value(value, scale=1.0, min_val=None, max_val=None):
-                    """Convert and validate numeric values."""
-                    try:
-                        if value is None:
-                            return None
-                        val = float(value) * scale
-                        if min_val is not None:
-                            val = max(min_val, val)
-                        if max_val is not None:
-                            val = min(max_val, val)
-                        return val
-                    except (ValueError, TypeError) as e:
-                        logging.warning(f"Value conversion failed: {str(e)}")
+                            # Helper function for value conversion
+            def convert_value(value, scale=1.0, min_val=None, max_val=None):
+                """Convert and validate numeric values."""
+                try:
+                    if value is None:
                         return None
+                    val = float(value) * scale
+                    if min_val is not None:
+                        val = max(min_val, val)
+                    if max_val is not None:
+                        val = min(max_val, val)
+                    return val
+                except (ValueError, TypeError) as e:
+                    logging.warning(f"Value conversion failed: {str(e)}")
+                    return None
 
-                # Battery data
-                battery_voltage = convert_value(data.get('Battery Voltage'), scale=0.1, min_val=0, max_val=100)
-                v['/Dc/0/Voltage'] = m['/Dc/0/Voltage'] = battery_voltage
-                
-                discharge_current = convert_value(data.get('Battery Discharge Current', 0), min_val=0)
-                m['/Dc/0/Current'] = -discharge_current if discharge_current is not None else 0
-                v['/Dc/0/Current'] = -m['/Dc/0/Current']
-                
-                charging_current = convert_value(data.get('Battery Charge Current', 0), min_val=0)
-                if charging_current is None:
-                    charging_current = 0
+            # Battery data
+            battery_voltage = convert_value(data.get('Battery Voltage'), scale=0.1, min_val=0, max_val=100)
+            v['/Dc/0/Voltage'] = m['/Dc/0/Voltage'] = battery_voltage
+            
+            discharge_current = convert_value(data.get('Battery Discharge Current', 0), min_val=0)
+            m['/Dc/0/Current'] = -discharge_current if discharge_current is not None else 0
+            v['/Dc/0/Current'] = -m['/Dc/0/Current']
+            
+            charging_current = convert_value(data.get('Battery Charge Current', 0), min_val=0)
+            if charging_current is None:
+                charging_current = 0
 
-                # AC Output data
-                v['/Ac/Out/L1/V'] = m['/Ac/Out/L1/V'] = convert_value(
-                    data.get('AC Output Voltage'), scale=0.1, min_val=0, max_val=300
-                )
-                v['/Ac/Out/L1/F'] = m['/Ac/Out/L1/F'] = convert_value(
-                    data.get('AC Output Frequency'), scale=0.1, min_val=45, max_val=65
-                )
-                v['/Ac/Out/L1/P'] = m['/Ac/Out/L1/P'] = convert_value(
-                    data.get('AC Output Active Power'), min_val=0
-                )
-                v['/Ac/Out/L1/S'] = m['/Ac/Out/L1/S'] = convert_value(
-                    data.get('AC Output Apparent Power'), min_val=0
-                )
+            # AC Output data
+            v['/Ac/Out/L1/V'] = m['/Ac/Out/L1/V'] = convert_value(
+                data.get('AC Output Voltage'), scale=0.1, min_val=0, max_val=300
+            )
+            v['/Ac/Out/L1/F'] = m['/Ac/Out/L1/F'] = convert_value(
+                data.get('AC Output Frequency'), scale=0.1, min_val=45, max_val=65
+            )
+            v['/Ac/Out/L1/P'] = m['/Ac/Out/L1/P'] = convert_value(
+                data.get('AC Output Active Power'), min_val=0
+            )
+            v['/Ac/Out/L1/S'] = m['/Ac/Out/L1/S'] = convert_value(
+                data.get('AC Output Apparent Power'), min_val=0
+            )
 
-                # AC Input data
-                v['/Ac/ActiveIn/L1/V'] = m['/Ac/In/1/L1/V'] = data.get('AC Input Voltage')
-                v['/Ac/ActiveIn/L1/F'] = m['/Ac/In/1/L1/F'] = data.get('AC Input Frequency')
+            # AC Input data
+            v['/Ac/ActiveIn/L1/V'] = m['/Ac/In/1/L1/V'] = convert_value(
+                data.get('AC Input Voltage'), scale=0.1, min_val=0, max_val=300
+            )
+            v['/Ac/ActiveIn/L1/F'] = m['/Ac/In/1/L1/F'] = convert_value(
+                data.get('AC Input Frequency'), scale=0.1, min_val=45, max_val=65
+            )
 
-                # Solar/PV data
-                m['/Pv/0/V'] = data.get('PV1 Input Voltage')
-                m['/Pv/0/P'] = data.get('PV1 Input Power')
-                m['/MppOperationMode'] = 2 if (m['/Pv/0/P'] or 0) > 0 else 0
+            # Solar/PV data
+            m['/Pv/0/V'] = convert_value(data.get('PV1 Input Voltage'), scale=0.1, min_val=0)
+            m['/Pv/0/P'] = convert_value(data.get('PV1 Input Power'), min_val=0)
+            m['/MppOperationMode'] = 2 if (m['/Pv/0/P'] or 0) > 0 else 0
 
                 # Process flags/warnings according to PI18SV protocol
                 # FLAG command returns:
