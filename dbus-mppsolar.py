@@ -141,14 +141,18 @@ class DbusMppSolarService(object):
             self._invData = runInverterCommands(['ID','VFW'], self._invProtocol)
         elif self._invProtocol == 'PI18SV':
             self._invData = runInverterCommands(['ID','VFW'], self._invProtocol)
-            # Check for parallel/3-phase configuration
-            try:
-                self._parallelInfo = runInverterCommands(['PRI0'], self._invProtocol)[0]
-                output_mode = self._parallelInfo.get('output_mode_setting', 'Single mode')
-                self._isParallel = 'parallel' in output_mode or 'Phase' in output_mode
-                self._phaseMode = output_mode
-                logging.warning(f"PI18SV parallel configuration detected: {output_mode}")
-            except:
+            # Detect parallel/3-phase by probing PGS0/1/2 (more reliable than PRI0)
+            phases_probe = runInverterCommands(['PGS0', 'PGS1', 'PGS2'], self._invProtocol)
+            phase_ok = [isinstance(p, dict) and p.get('ac_output_voltage') is not None for p in phases_probe]
+            num_ok = sum(1 for ok in phase_ok if ok)
+            if num_ok >= 2:
+                self._isParallel = True
+                if num_ok == 3:
+                    self._phaseMode = '3-phase parallel'
+                else:
+                    self._phaseMode = 'parallel'
+                logging.warning(f"PI18SV parallel configuration detected: {self._phaseMode} ({num_ok} phases responding)")
+            else:
                 self._isParallel = False
                 self._phaseMode = 'Single mode'
                 logging.warning("PI18SV running in single mode")
