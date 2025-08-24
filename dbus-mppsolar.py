@@ -236,37 +236,60 @@ class DbusMppSolarService(object):
         self._tty = tty
         self._queued_updates = []
 
-        # Default to PI18SV and initialize data
+        # Initialize protocol and data
         self._invProtocol = "PI18SV"
         self._invData = []
-        
-        try:
-            # Try PI18SV protocol first
-            response = runInverterCommands(['PI', 'ID', 'VFW'], "PI18SV")
-            if 'error' not in response[0]:
-                logging.info("PI18SV protocol confirmed")
-                self._invData = response
-                return
-            
-            # If PI18SV fails, try others
-            response = runInverterCommands(['QPI'])[0]
-            if 'error' not in response:
-                protocol = response.get('protocol_id', 'PI18SV')
-                if protocol != 'PI18SV':
-                    logging.warning(f"Found protocol {protocol}, but forcing PI18SV")
-                self._invProtocol = 'PI18SV'
+        self._detect_protocol()
+
+    def _detect_protocol(self):
+        """Detect and verify PI18SV protocol support with retries."""
+        max_retries = 3
+        base_delay = 1.0  # Base delay in seconds
+
+        for attempt in range(max_retries):
+            try:
+                # Try PI18SV protocol commands first
+                logging.info(f"Attempting PI18SV protocol detection (attempt {attempt + 1}/{max_retries})")
+                response = runInverterCommands(['PI', 'ID', 'VFW'], "PI18SV")
                 
-            # Get inverter data
-            self._invData = runInverterCommands(['ID', 'VFW'], self._invProtocol)
-                
-        except Exception as e:
-            logging.warning(f"Protocol detection error: {str(e)}, defaulting to PI18SV")
-            self._invProtocol = "PI18SV"
-            # Initialize with empty data if commands fail
-            self._invData = [
-                {"serial_number": "UNKNOWN"},
-                {"main_cpu_firmware_version": "0.0"}
-            ]
+                if response and not any('error' in r for r in response):
+                    logging.info("PI18SV protocol confirmed")
+                    self._invData = response
+                    return True
+
+                # If that fails, try QPI command
+                logging.debug("PI18SV direct test failed, trying QPI")
+                response = runInverterCommands(['QPI'])[0]
+                if 'error' not in response:
+                    protocol = response.get('protocol_id', 'PI18SV')
+                    if protocol != 'PI18SV':
+                        logging.warning(f"Found protocol {protocol}, but forcing PI18SV for compatibility")
+                    self._invProtocol = 'PI18SV'
+                    
+                    # Get inverter data
+                    self._invData = runInverterCommands(['ID', 'VFW'], self._invProtocol)
+                    if not any('error' in r for r in self._invData):
+                        return True
+
+                # Wait before retry with exponential backoff
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logging.info(f"Protocol detection failed, retrying in {delay:.1f}s")
+                    time.sleep(delay)
+                    
+            except Exception as e:
+                logging.warning(f"Protocol detection attempt {attempt + 1} failed: {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt))
+
+        # If all attempts fail, set defaults
+        logging.warning("Protocol detection failed after all retries, using defaults")
+        self._invProtocol = "PI18SV"
+        self._invData = [
+            {"serial_number": "UNKNOWN"},
+            {"main_cpu_firmware_version": "0.0"}
+        ]
+        return False
         
         # Always use PI18SV protocol
         if not self._invData:  # If we don't have data yet
@@ -733,32 +756,69 @@ class DbusMppSolarService(object):
     def _change_PI17(self, path, value):
         return True # accept the change
 
+    def _handle_protocol_error(self, error_type, error_data=None):
+        """Handle protocol-specific errors with appropriate recovery actions."""
+        with self._dbusmulti as m:
+            if error_type == 'communication':
+                m['/Alarms/Connection'] = 2
+                m['/State'] = 0
+                logging.error("Communication error with inverter")
+            elif error_type == 'status_error':
+                m['/Alarms/Connection'] = 1
+                m['/State'] = 2  # Fault state
+                logging.error(f"Status error: {error_data}")
+            elif error_type == 'data_error':
+                # Keep last known good values, just update alarm
+                m['/Alarms/Connection'] = 1
+                logging.warning(f"Data error: {error_data}")
+            elif error_type == 'timeout':
+                m['/Alarms/Connection'] = 1
+                logging.warning("Command timeout")
+            else:
+                m['/Alarms/Connection'] = 1
+                logging.warning(f"Unknown error type: {error_type}")
+
     def _update_PI18SV(self):
-        """Update handler for PI18SV protocol (similar to PI17)."""
+        """Update handler for PI18SV protocol."""
         logging.info("Starting PI18SV update cycle")
         try:
-            # Use correct PI18SV commands:
-            # GS - Query general status
-            # MOD - Device working mode inquiry
-            # PIRI - Device rated information
-            # FLAG - Query enable/disable flag status
-            # Get status data - try basic commands first
-            raw = runInverterCommands(['GS'], self._invProtocol)
-            if not raw or 'error' in raw[0]:
-                logging.error("Failed to get basic status")
+            # Define command batches for better performance
+            status_batch = ['GS', 'MOD', 'FLAG']  # Basic status and mode
+            power_batch = ['PIRI']  # Power ratings and configuration
+            
+            # Execute status command batch with retry
+            max_retries = 2
+            for attempt in range(max_retries):
+                raw_status = runInverterCommands(status_batch, self._invProtocol)
+                if raw_status and len(raw_status) == len(status_batch):
+                    break
+                if attempt < max_retries - 1:
+                    logging.warning(f"Status command retry {attempt + 1}")
+                    time.sleep(1)
+            
+            if not raw_status or len(raw_status) != len(status_batch):
+                self._handle_protocol_error('communication')
                 return False
-            data = raw[0]
-
-            # Get mode info
-            raw = runInverterCommands(['MOD'], self._invProtocol)
-            if not raw:
-                logging.error("Failed to get mode info")
+                
+            # Parse status responses
+            data = raw_status[0]  # GS response
+            mode = raw_status[1]  # MOD response
+            flags = raw_status[2] if len(raw_status) > 2 else {}  # FLAG response
+            
+            # Check for critical data
+            if 'error' in data or 'error' in mode:
+                self._handle_protocol_error('status_error', {'data': data, 'mode': mode})
                 return False
-            mode = raw[0]
-
-            # Get flags (optional)
-            raw = runInverterCommands(['FLAG'], self._invProtocol)
-            flags = raw[0] if raw else {}
+                
+            # Get power configuration (optional)
+            try:
+                raw_power = runInverterCommands(power_batch, self._invProtocol)
+                power_data = raw_power[0] if raw_power else {}
+                if 'error' in power_data:
+                    self._handle_protocol_error('data_error', {'power': power_data})
+            except Exception as e:
+                logging.warning(f"Power data retrieval failed: {str(e)}")
+                power_data = {}
         
         with self._dbusmulti as m, self._dbusvebus as v:
             # Handle inverter state
@@ -792,17 +852,46 @@ class DbusMppSolarService(object):
                 m['/State'] = 0  # Off
             v['/State'] = m['/State']
 
+                                def convert_value(value, scale=1.0, min_val=None, max_val=None):
+                    """Convert and validate numeric values."""
+                    try:
+                        if value is None:
+                            return None
+                        val = float(value) * scale
+                        if min_val is not None:
+                            val = max(min_val, val)
+                        if max_val is not None:
+                            val = min(max_val, val)
+                        return val
+                    except (ValueError, TypeError) as e:
+                        logging.warning(f"Value conversion failed: {str(e)}")
+                        return None
+
                 # Battery data
-                v['/Dc/0/Voltage'] = m['/Dc/0/Voltage'] = data.get('Battery Voltage')
-                m['/Dc/0/Current'] = -(data.get('Battery Discharge Current', 0) or 0)
-            v['/Dc/0/Current'] = -m['/Dc/0/Current']
-                charging_current = data.get('Battery Charge Current', 0)
+                battery_voltage = convert_value(data.get('Battery Voltage'), scale=0.1, min_val=0, max_val=100)
+                v['/Dc/0/Voltage'] = m['/Dc/0/Voltage'] = battery_voltage
+                
+                discharge_current = convert_value(data.get('Battery Discharge Current', 0), min_val=0)
+                m['/Dc/0/Current'] = -discharge_current if discharge_current is not None else 0
+                v['/Dc/0/Current'] = -m['/Dc/0/Current']
+                
+                charging_current = convert_value(data.get('Battery Charge Current', 0), min_val=0)
+                if charging_current is None:
+                    charging_current = 0
 
                 # AC Output data
-                v['/Ac/Out/L1/V'] = m['/Ac/Out/L1/V'] = data.get('AC Output Voltage')
-                v['/Ac/Out/L1/F'] = m['/Ac/Out/L1/F'] = data.get('AC Output Frequency')
-                v['/Ac/Out/L1/P'] = m['/Ac/Out/L1/P'] = data.get('AC Output Active Power')
-                v['/Ac/Out/L1/S'] = m['/Ac/Out/L1/S'] = data.get('AC Output Apparent Power')
+                v['/Ac/Out/L1/V'] = m['/Ac/Out/L1/V'] = convert_value(
+                    data.get('AC Output Voltage'), scale=0.1, min_val=0, max_val=300
+                )
+                v['/Ac/Out/L1/F'] = m['/Ac/Out/L1/F'] = convert_value(
+                    data.get('AC Output Frequency'), scale=0.1, min_val=45, max_val=65
+                )
+                v['/Ac/Out/L1/P'] = m['/Ac/Out/L1/P'] = convert_value(
+                    data.get('AC Output Active Power'), min_val=0
+                )
+                v['/Ac/Out/L1/S'] = m['/Ac/Out/L1/S'] = convert_value(
+                    data.get('AC Output Apparent Power'), min_val=0
+                )
 
                 # AC Input data
                 v['/Ac/ActiveIn/L1/V'] = m['/Ac/In/1/L1/V'] = data.get('AC Input Voltage')
