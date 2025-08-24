@@ -819,13 +819,14 @@ class DbusMppSolarService(object):
             except Exception as e:
                 logging.warning(f"Power data retrieval failed: {str(e)}")
                 power_data = {}
-        
-        with self._dbusmulti as m, self._dbusvebus as v:
-            # Handle inverter state
-            if 'error' in data:
-                m['/State'] = 0
-                m['/Alarms/Connection'] = 2
-                return True
+
+            # Process the data
+            with self._dbusmulti as m, self._dbusvebus as v:
+                # Handle inverter state
+                if 'error' in data:
+                    m['/State'] = 0
+                    m['/Alarms/Connection'] = 2
+                    return True
             
             # Map working mode to state according to PI18SV protocol
             # 00=Power on mode
