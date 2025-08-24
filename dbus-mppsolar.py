@@ -107,10 +107,22 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
                 parsed = json.loads(result)
             else:
                 logging.debug(f"Executing{attempt_str}: {cmd} (protocol: {protocol})")
-                # Add delay between commands
-                time.sleep(0.2)
                 
-                # Clear any pending data by reading it
+                # Configure port for PI18SV protocol
+                try:
+                    dev._port.baudrate = 2400
+                    dev._port.bytesize = 8
+                    dev._port.parity = 'N'
+                    dev._port.stopbits = 1
+                    dev._port.timeout = 1
+                    logging.debug(f"Port settings: {dev._port.get_settings()}")
+                except Exception as e:
+                    logging.debug(f"Port config error: {str(e)}")
+                
+                # Add delay between commands
+                time.sleep(0.5)  # Longer delay
+                
+                # Clear any pending data
                 try:
                     if dev._port.in_waiting:
                         logging.debug(f"Clearing {dev._port.in_waiting} bytes from input buffer")
@@ -119,12 +131,39 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
                             logging.debug(f"Cleared: {data.hex()}")
                 except Exception as e:
                     logging.debug(f"Buffer clearing skipped: {str(e)}")
+                
+                # Send command with proper format
+                cmd_str = f"^P{len(cmd):03d}{cmd}\r"
+                logging.debug(f"Sending command: {cmd_str.encode().hex()}")
+                dev._port.write(cmd_str.encode())
+                dev._port.flush()
+                
+                # Wait for response
+                time.sleep(0.2)
+                
+                # Read response
+                response = b''
+                while True:
+                    if dev._port.in_waiting:
+                        byte = dev._port.read()
+                        response += byte
+                        if byte == b'\r':  # End of response
+                            break
+                    else:
+                        time.sleep(0.1)
+                        if time.time() - start_time > 2:  # 2 second timeout
+                            break
+                
+                logging.debug(f"Raw response: {response.hex()}")
+                
+                # Parse response
+                if response:
+                    result = response
+                else:
+                    result = b''
                     
-                result = dev.run_command(command=cmd)
-                # Add delay after command
-                time.sleep(0.1)
                 parsed = mppsolar.outputs.to_json(result, False, None, None)
-                logging.debug(f"Raw result: {result}")
+                logging.debug(f"Parsed result: {parsed}")
             
             duration = (datetime.datetime.now() - start_time).total_seconds()
             logging.debug(f"Command completed in {duration:.3f}s")
