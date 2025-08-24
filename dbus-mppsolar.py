@@ -15,43 +15,53 @@ import sys
 import os
 import subprocess as sp
 import json
-from enum import Enum
 import datetime
 import time
 import dbus
 import dbus.service
 
 # Configure logging with timestamps and more detail
-import datetime
 
-def setup_logging():
-    """Configure logging with detailed formatting."""
+def setup_logging(log_level=logging.INFO, log_file='/var/log/dbus-mppsolar.log', max_size=1024*1024, backup_count=5):
+    """Configure logging with detailed formatting and rotation.
+    
+    Args:
+        log_level: Logging level (default: INFO)
+        log_file: Path to log file (default: /var/log/dbus-mppsolar.log)
+        max_size: Maximum size of log file before rotation in bytes (default: 1MB)
+        backup_count: Number of backup files to keep (default: 5)
+    """
     log_format = '%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
-    # Set up file handler for persistent logs
+    # Set up rotating file handler for persistent logs
     try:
-        log_file = '/var/log/dbus-mppsolar.log'
-        file_handler = logging.FileHandler(log_file)
+        from logging.handlers import RotatingFileHandler
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=max_size,
+            backupCount=backup_count
+        )
         file_handler.setFormatter(logging.Formatter(log_format, date_format))
         
-        # Also log to console
+        # Also log to console with less verbose format
         console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter(log_format, date_format))
+        console_format = '%(levelname)s: %(message)s'
+        console_handler.setFormatter(logging.Formatter(console_format))
         
         # Configure root logger
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)  # Set to INFO for more detail
+        root_logger.setLevel(log_level)
         root_logger.addHandler(file_handler)
         root_logger.addHandler(console_handler)
         
-        logging.info("Logging initialized - dbus-mppsolar %s", VERSION)
+        logging.info("Logging initialized - dbus-mppsolar %s (level: %s, file: %s)", 
+                    VERSION, logging.getLevelName(log_level), log_file)
     except Exception as e:
         # Fallback to basic logging if file logging fails
         logging.basicConfig(
-            level=logging.INFO,
-            format=log_format,
-            datefmt=date_format
+            level=log_level,
+            format=console_format
         )
         logging.warning("Failed to set up file logging: %s", str(e))
 
@@ -61,12 +71,10 @@ setup_logging()
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'velib_python'))
 from vedbus import VeDbusService, VeDbusItemExport, VeDbusItemImport
 
-# Workarounds for some inverter specific problem I saw
-INVERTER_OFF_ASSUME_BYPASS = True
-GUESS_AC_CHARGING = True
-
-# Should we import and call manually, to use our version
-USE_SYSTEM_MPPSOLAR = False
+# Configuration constants
+INVERTER_OFF_ASSUME_BYPASS = True  # When inverter is off, assume AC input is directly connected to output
+GUESS_AC_CHARGING = True  # Estimate AC charging current when not directly available
+USE_SYSTEM_MPPSOLAR = False  # If True, use system-installed mppsolar package; if False, use local version
 if USE_SYSTEM_MPPSOLAR:
     try:
         import mppsolar
@@ -77,13 +85,23 @@ if not USE_SYSTEM_MPPSOLAR:
     import mppsolar
 
 # Inverter commands to read from the serial
-def runInverterCommands(commands, protocol="PI30", retries=2):
-    """Run commands with error handling, retries and detailed logging."""
+def runInverterCommands(commands, protocol="PI30", retries=2, retry_delay=0.5):
+    """Run commands with error handling, retries and detailed logging.
+    
+    Args:
+        commands: List of commands to execute
+        protocol: Protocol to use (default: PI30)
+        retries: Number of retries for failed commands (default: 2)
+        retry_delay: Base delay between retries in seconds (default: 0.5)
+    
+    Returns:
+        List of command results, or None if all commands failed
+    """
     global args
     global mainloop
     
     def log_command_result(cmd, result, attempt=None):
-        """Log command execution details."""
+        """Log command execution details with consistent formatting."""
         attempt_str = f" (attempt {attempt}/{retries})" if attempt else ""
         if isinstance(result, dict):
             if "error" in result:
@@ -96,66 +114,66 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
             logging.debug(f"Command '{cmd}' returned{attempt_str}: {result}")
 
     def execute_command(dev, cmd, attempt_num=None):
-        """Execute single command with logging."""
+        """Execute single command with consistent error handling.
+        
+        Args:
+            dev: Device instance to use
+            cmd: Command to execute
+            attempt_num: Current attempt number for retry logging
+        
+        Returns:
+            Parsed command result or error dict
+        """
         attempt_str = f" (attempt {attempt_num})" if attempt_num else ""
         start_time = datetime.datetime.now()
+        result = None
+        
         try:
             if USE_SYSTEM_MPPSOLAR:
                 cmd_str = f"mpp-solar -b {args.baudrate} -P {protocol} -p {args.serial} -o json -c {cmd}"
                 logging.debug(f"Executing{attempt_str}: {cmd_str}")
                 result = sp.getoutput(cmd_str).split('\n')[0]
-                parsed = json.loads(result)
-            else:
-                # Try command with current protocol
-                logging.debug(f"Executing command {cmd} with protocol {protocol}")
-                try:
-                    # Get a fresh device instance
-                    dev = mppsolar.helpers.get_device_class("mppsolar")(
-                        port=args.serial,
-                        protocol=protocol,
-                        baud=args.baudrate
-                    )
-                    
-                    # Add delay between commands
-                    time.sleep(0.2)
-                    
-                    # Execute command
-                    logging.debug(f"Sending command: {cmd}")
-                    result = dev.run_command(command=cmd)
-                    logging.debug(f"Raw result: {result}")
-                    
-                    # Parse response
-                    if result and not isinstance(result, dict):
-                        parsed = mppsolar.outputs.to_json(result, False, None, None)
-                        logging.debug(f"Parsed result: {parsed}")
-                        if not 'error' in parsed:
-                            return parsed
-                    else:
-                        logging.debug(f"Invalid response type: {type(result)}")
-                        
-                except Exception as e:
-                    logging.debug(f"Command execution failed: {str(e)}")
-                    
-                # If we get here, command failed
-                logging.debug(f"Command {cmd} failed with protocol {protocol}")
-                
-                # If we get here, both protocols failed
-                logging.debug(f"All protocols failed for command {cmd}")
-                result = b''
-                    
-                parsed = mppsolar.outputs.to_json(result, False, None, None)
-                logging.debug(f"Parsed result: {parsed}")
+                return json.loads(result)
             
-            duration = (datetime.datetime.now() - start_time).total_seconds()
-            logging.debug(f"Command completed in {duration:.3f}s")
-            return parsed
+            # Try command with current protocol
+            logging.debug(f"Executing command {cmd} with protocol {protocol}")
+            
+            # Get a fresh device instance if needed
+            if dev is None:
+                dev = mppsolar.helpers.get_device_class("mppsolar")(
+                    port=args.serial,
+                    protocol=protocol,
+                    baud=args.baudrate
+                )
+            
+            # Execute command with timing
+            time.sleep(0.2)  # Delay between commands
+            result = dev.run_command(command=cmd)
+            
+            if not result:
+                return {"error": "No response", "raw_response": ""}
+            
+            if isinstance(result, dict):
+                return result
+            
+            # Parse non-dict response
+            parsed = mppsolar.outputs.to_json(result, False, None, None)
+            if parsed and not 'error' in parsed:
+                return parsed
+            
+            return {"error": "Invalid response", "raw_response": str(result)}
             
         except Exception as e:
+            error_msg = f"Command execution failed: {str(e)}"
+            logging.debug(error_msg)
+            return {"error": error_msg, "raw_response": str(result) if result else ""}
+        finally:
             duration = (datetime.datetime.now() - start_time).total_seconds()
-            logging.error(f"Command failed after {duration:.3f}s: {str(e)}")
-            return {"error": str(e), "raw_response": str(result) if 'result' in locals() else ""}
+            logging.debug(f"Command completed in {duration:.3f}s")
 
     try:
+        # Initialize device once for all commands
+        dev = None
         if not USE_SYSTEM_MPPSOLAR:
             logging.debug(f"Initializing device with protocol={protocol}, port={args.serial}, baud={args.baudrate}")
             dev = mppsolar.helpers.get_device_class("mppsolar")(
@@ -163,8 +181,6 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
                 protocol=protocol, 
                 baud=args.baudrate
             )
-        else:
-            dev = None
 
         results = []
         for cmd in commands:
@@ -172,26 +188,39 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
             for attempt in range(retries):
                 try:
                     result = execute_command(dev, cmd, attempt+1)
+                    
+                    # Check for success
                     if not isinstance(result, dict) or "error" not in result:
                         break  # Success
+                        
+                    # Handle retry
                     if attempt < retries - 1:
-                        logging.info(f"Retrying command '{cmd}' after failure")
-                        time.sleep(0.5)  # Wait before retry
+                        delay = retry_delay * (2 ** attempt)  # Exponential backoff
+                        logging.info(f"Retrying command '{cmd}' after failure in {delay:.1f}s")
+                        time.sleep(delay)
+                        
                 except Exception as e:
+                    error_msg = f"Attempt {attempt+1} failed for '{cmd}': {str(e)}"
                     if attempt < retries - 1:
-                        logging.warning(f"Attempt {attempt+1} failed for '{cmd}': {str(e)}")
-                        time.sleep(0.5)
+                        logging.warning(error_msg)
+                        time.sleep(retry_delay * (2 ** attempt))
                     else:
+                        logging.error(error_msg)
                         result = {"error": str(e), "raw_response": ""}
 
             log_command_result(cmd, result)
             results.append(result)
 
+            # Add delay between different commands
+            if len(commands) > 1 and cmd != commands[-1]:
+                time.sleep(0.1)  # Small delay between commands
+
         return results
 
     except Exception as e:
-        logging.error(f"Failed to execute command batch: {str(e)}", exc_info=True)
-        return [{"error": str(e), "raw_response": ""} for _ in commands]
+        error_msg = f"Failed to execute command batch: {str(e)}"
+        logging.error(error_msg, exc_info=True)
+        return [{"error": error_msg, "raw_response": ""} for _ in commands]
 
 def setOutputSource(source):
     #POP<NN>: Setting device output source priority
@@ -230,11 +259,40 @@ class SessionBus(dbus.bus.BusConnection):
 def dbusconnection():
     return SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else SystemBus()
 
-# Our MPP solar service that conencts to 2 dbus services (multi & vebus)
+# Our MPP solar service that connects to 2 dbus services (multi & vebus)
 class DbusMppSolarService(object):
+    """DBus service for MPP Solar inverters.
+    
+    This service provides two DBus interfaces:
+    1. com.victronenergy.multi.mppsolar.<tty> - Main inverter interface
+    2. com.victronenergy.acsystem.mppsolar.<tty> - AC system interface
+    
+    The service implements the standard paths as specified in the Victron DBus API:
+    https://github.com/victronenergy/venus/wiki/dbus-api
+    
+    Paths are organized by category:
+    - /Ac/* - AC-related values (voltage, current, power)
+    - /Dc/* - DC-related values (battery voltage, current)
+    - /Pv/* - Solar-related values (PV voltage, power)
+    - /Settings/* - Configurable settings
+    - /State - Overall inverter state
+    - /Alarms/* - Various alarm conditions
+    """
+    
     def __init__(self, tty, deviceinstance, productname='MPPSolar', connection='MPPSolar interface'):
+        """Initialize the DBus service.
+        
+        Args:
+            tty: TTY device name (without /dev/)
+            deviceinstance: Unique device instance number
+            productname: Product name for identification
+            connection: Connection description
+        """
         self._tty = tty
         self._queued_updates = []
+        self._start_time = time.time()  # Service start time
+        self._last_update = 0  # Last successful update timestamp
+        self._update_interval = 2  # Update interval in seconds
 
         # Initialize protocol and data
         self._invProtocol = "PI18SV"
@@ -439,10 +497,18 @@ class DbusMppSolarService(object):
         service.add_path('/HardwareVersion', 0)
         service.add_path('/Connected', 1)
 
-        # Create the paths for modifying the system manually
+        # Create paths for service status monitoring
+        service.add_path('/Status/LastUpdate', None)  # Timestamp of last successful update
+        service.add_path('/Status/UpdateCount', 0)  # Number of successful updates
+        service.add_path('/Status/ErrorCount', 0)  # Number of update errors
+        service.add_path('/Status/LastError', '')  # Last error message
+        service.add_path('/Status/Uptime', 0)  # Service uptime in seconds
+        
+        # Create paths for modifying the system manually
         service.add_path('/Settings/Reset', None, writeable=True, onchangecallback=self._change)
         service.add_path('/Settings/Charger', None, writeable=True, onchangecallback=self._change)
         service.add_path('/Settings/Output', None, writeable=True, onchangecallback=self._change)
+        service.add_path('/Settings/UpdateInterval', self._update_interval, writeable=True, onchangecallback=self._change)
 
     def _updateInternal(self):
         # Store in the paths all values that were updated from _handleChangedValue
@@ -461,22 +527,60 @@ class DbusMppSolarService(object):
                 pass
 
     def _update(self):
+        """Update service data from inverter.
+        
+        This method is called periodically to update all DBus paths with fresh data.
+        It handles protocol selection, error tracking, and status monitoring.
+        """
         global mainloop
+        
+        # Check if it's time to update
+        now = time.time()
+        if now - self._last_update < self._update_interval:
+            return True
+            
         self._connectToDc()
-        logging.info("{} updating".format(datetime.datetime.now().time()))
-        try: 
+        logging.info("Updating at {}".format(datetime.datetime.now().time()))
+        
+        try:
+            # Update service status
+            with self._dbusmulti as m:
+                m['/Status/LastUpdate'] = int(now)
+                m['/Status/Uptime'] = int(now - self._start_time)
+            
+            # Select appropriate protocol handler
             if self._invProtocol == 'PI30' or self._invProtocol == 'PI30MAX':
-                return self._update_PI30()
+                success = self._update_PI30()
             elif self._invProtocol == 'PI17':
-                return self._update_PI17()
+                success = self._update_PI17()
             elif self._invProtocol == 'PI18SV':
-                return self._update_PI18SV()
+                success = self._update_PI18SV()
             else:
                 logging.warning(f"Unknown protocol {self._invProtocol}, defaulting to PI18SV")
                 self._invProtocol = 'PI18SV'
-                return self._update_PI18SV()
-        except:
-            logging.exception('Error in update loop', exc_info=True)
+                success = self._update_PI18SV()
+            
+            # Update status based on result
+            with self._dbusmulti as m:
+                if success:
+                    self._last_update = now
+                    m['/Status/UpdateCount'] = m['/Status/UpdateCount'] + 1
+                    m['/Status/LastError'] = ''
+                else:
+                    m['/Status/ErrorCount'] = m['/Status/ErrorCount'] + 1
+                    m['/Status/LastError'] = 'Update failed'
+            
+            return success
+            
+        except Exception as e:
+            error_msg = str(e)
+            logging.exception('Error in update loop')
+            
+            # Update error status
+            with self._dbusmulti as m:
+                m['/Status/ErrorCount'] = m['/Status/ErrorCount'] + 1
+                m['/Status/LastError'] = error_msg
+            
             mainloop.quit()
             return False
 
@@ -1123,11 +1227,23 @@ class DbusMppSolarService(object):
             return False
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--baudrate","-b", default=2400, type=int)
-    parser.add_argument("--serial","-s", required=True, type=str)
+    parser = argparse.ArgumentParser(description="DBus service for MPP Solar inverters")
+    parser.add_argument("--baudrate", "-b", default=2400, type=int,
+                      help="Serial port baud rate (default: 2400)")
+    parser.add_argument("--serial", "-s", required=True, type=str,
+                      help="Serial port device path")
+    parser.add_argument("--log-level", "-l", default="INFO",
+                      choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                      help="Logging level (default: INFO)")
+    parser.add_argument("--log-file", "-f", default="/var/log/dbus-mppsolar.log",
+                      help="Log file path (default: /var/log/dbus-mppsolar.log)")
+    
     global args
     args = parser.parse_args()
+    
+    # Configure logging based on command line arguments
+    log_level = getattr(logging, args.log_level.upper())
+    setup_logging(log_level=log_level, log_file=args.log_file)
 
     from dbus.mainloop.glib import DBusGMainLoop
     # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
