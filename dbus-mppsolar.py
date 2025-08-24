@@ -700,14 +700,19 @@ class DbusMppSolarService(object):
     def _update_PI18SV(self):
         # PI18SV uses different commands for single vs parallel systems
         if hasattr(self, '_isParallel') and self._isParallel:
-            # Use PGS for parallel systems - query each phase
-            raw = runInverterCommands(['PGS0', 'PGS1', 'PGS2', 'MOD'], self._invProtocol)
-            phase1_data, phase2_data, phase3_data, mode = raw
+            # Use PGS for parallel systems - query each phase (avoid MOD for stability)
+            raw = runInverterCommands(['PGS0', 'PGS1', 'PGS2'], self._invProtocol)
+            # If any command failed, default to empty dicts
+            phase1_data = raw[0] if len(raw) > 0 and isinstance(raw[0], dict) else {}
+            phase2_data = raw[1] if len(raw) > 1 and isinstance(raw[1], dict) else {}
+            phase3_data = raw[2] if len(raw) > 2 and isinstance(raw[2], dict) else {}
             data = phase1_data  # Use phase 1 as primary for common values
+            invMode = None
         else:
-            # Use GS for single systems
-            raw = runInverterCommands(['GS','MOD'], self._invProtocol) 
-            data, mode = raw
+            # Use GS for single systems (avoid MOD for stability)
+            raw = runInverterCommands(['GS'], self._invProtocol)
+            data = raw[0] if len(raw) > 0 and isinstance(raw[0], dict) else {}
+            invMode = None
             
         dcSystem = None
         if self._systemDcPower != None:
@@ -723,20 +728,36 @@ class DbusMppSolarService(object):
                 return True
             
             # Map PI18SV working modes to dbus states
-            invMode = mode.get('working_mode', None)
-            if invMode == 'Battery mode':
-                m['/State'] = 9 # Inverting
-            elif invMode == 'Hybrid mode(Line mode, Grid mode)':
-                if data.get('battery_charging_current', 0) > 0:
-                    m['/State'] = 3 # Bulk charging
-                else:    
-                    m['/State'] = 8 # Passthru
-            elif invMode == 'Standby mode':
-                m['/State'] = 6 if data.get('battery_charging_current', 0) > 0 else 0
-            elif invMode == 'Fault mode':
-                m['/State'] = 2 # Fault
+            # If MOD not queried or failed, infer from GS data heuristically
+            if invMode is None:
+                charging_current = data.get('battery_charging_current', 0) or 0
+                ac_in_v = data.get('ac_input_voltage') or 0
+                ac_out_v = data.get('ac_output_voltage') or 0
+                active_power = data.get('ac_output_active_power') or 0
+                load_connected = data.get('load_connection', None) == 'connect'
+
+                if charging_current > 0:
+                    m['/State'] = 3  # Bulk charging
+                elif active_power > 0 or (load_connected and ac_out_v):
+                    m['/State'] = 9  # Inverting
+                elif ac_in_v:
+                    m['/State'] = 8  # Passthru
+                else:
+                    m['/State'] = 0  # Off/unknown
             else:
-                m['/State'] = 0 # OFF
+                if invMode == 'Battery mode':
+                    m['/State'] = 9 # Inverting
+                elif invMode == 'Hybrid mode(Line mode, Grid mode)':
+                    if data.get('battery_charging_current', 0) > 0:
+                        m['/State'] = 3 # Bulk charging
+                    else:    
+                        m['/State'] = 8 # Passthru
+                elif invMode == 'Standby mode':
+                    m['/State'] = 6 if data.get('battery_charging_current', 0) > 0 else 0
+                elif invMode == 'Fault mode':
+                    m['/State'] = 2 # Fault
+                else:
+                    m['/State'] = 0 # OFF
             v['/State'] = m['/State']
 
             # Battery data (same for all phases)
