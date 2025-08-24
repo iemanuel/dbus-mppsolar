@@ -1,259 +1,233 @@
 #!/usr/bin/env python3
-"""
-Real-device protocol and settings detector for EASUN/PI18-family inverters.
-
-Probes a serial device (default /dev/ttyUSB0) across common baud rates using
-PI18 and PI18SV protocols, sending a small set of safe commands. Reports the
-best working protocol and baud, with sample responses.
-"""
-
-import argparse
-import os
-import sys
+import logging
+import serial
 import time
-from typing import List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
+logging.basicConfig(level=logging.INFO,
+                   format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Ensure local submodules are importable when run from repo root
-REPO_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(REPO_DIR, "mpp-solar"))
+def calculate_crc(data: bytes) -> bytes:
+    """Calculate CRC for MPP-Solar protocol."""
+    crc = 0
+    for byte in data:
+        crc += byte
+    crc = ((~crc) & 0xFFFF) + 1
+    return bytes([crc >> 8, crc & 0xFF])  # Returns high byte, low byte
 
-try:
-    import serial  # pyserial
-    from serial.rs485 import RS485Settings
-except Exception as exc:
-    print(f"✗ pyserial not available: {exc}")
-    sys.exit(1)
+def format_command(cmd: str) -> bytes:
+    """Format command with proper prefix, length and CRC."""
+    # Start with ^P, add 3 digit length, add command
+    cmd_without_crc = f"^P{len(cmd):03d}{cmd}".encode()
+    
+    # Calculate and append CRC
+    crc = calculate_crc(cmd_without_crc)
+    return cmd_without_crc + crc + b'\r'
 
+class ProtocolDetector:
+    def __init__(self, port: str = "/dev/ttyUSB0"):
+        self.port = port
+        self.serial = None
+        self.baud_rates = [2400, 9600, 4800]
+        self.serial_configs = [
+            # (bytesize, parity, stopbits)
+            (serial.EIGHTBITS, serial.PARITY_NONE, serial.STOPBITS_ONE),
+            (serial.EIGHTBITS, serial.PARITY_EVEN, serial.STOPBITS_ONE),
+            (serial.EIGHTBITS, serial.PARITY_ODD, serial.STOPBITS_ONE),
+        ]
+        
+        # Comprehensive test commands based on protocol doc
+        self.test_commands = [
+            # Basic identification
+            'PI',    # Protocol ID
+            'ID',    # Device Serial Number
+            'VFW',   # CPU Version
+            
+            # Status commands
+            'GS',    # General Status
+            'MOD',   # Working Mode
+            'PIRI',  # Rated Information
+            'FWS',   # Fault/Warning Status
+            
+            # Additional status
+            'T',     # Current Time
+            'ET',    # Total Generated Energy
+            'FLAG',  # Enable/Disable Status
+            
+            # Configuration queries
+            'DI',    # Default Parameters
+            'MCHGCR',# Max Charging Current Options
+            'MUCHGCR',# Max AC Charging Current Options
+            
+            # Parallel system queries (if applicable)
+            'PGS0',  # Parallel General Status
+            'PRI0',  # Parallel Rated Info
+        ]
+        
+    def _open_serial(self, baud: int, bytesize: int, parity: str, stopbits: float) -> bool:
+        try:
+            if self.serial:
+                self.serial.close()
+            
+            self.serial = serial.Serial(
+                port=self.port,
+                baudrate=baud,
+                bytesize=bytesize,
+                parity=parity,
+                stopbits=stopbits,
+                timeout=1
+            )
+            return True
+        except Exception as e:
+            logging.error(f"Failed to open {self.port}: {e}")
+            return False
 
-# Lazy import protocol classes
-def load_protocols():
-    from mppsolar.protocols.pi18 import pi18  # type: ignore
-    from mppsolar.protocols.pi18sv import pi18sv  # type: ignore
-    return [("PI18", pi18), ("PI18SV", pi18sv)]
+    def _send_command(self, cmd: bytes) -> Optional[bytes]:
+        """Send a command and return the response."""
+        try:
+            self.serial.write(cmd)
+            self.serial.flush()
+            time.sleep(0.1)  # Give device time to respond
+            
+            response = b''
+            start_time = time.time()
+            
+            while (time.time() - start_time) < 1.0:  # 1 second timeout
+                if self.serial.in_waiting:
+                    byte = self.serial.read()
+                    response += byte
+                    if byte == b'\r':  # End of response
+                        break
+                time.sleep(0.01)
+                    
+            return response if response else None
+            
+        except Exception as e:
+            logging.error(f"Communication error: {e}")
+            return None
 
+    def _validate_response(self, response: bytes) -> Tuple[bool, bool]:
+        """
+        Validate response format and CRC.
+        Returns (is_valid_format, is_valid_crc)
+        """
+        if not response or len(response) < 5:
+            return False, False
+            
+        # Check basic format (^D...)
+        if not response.startswith(b'^D'):
+            # Also accept NAK responses
+            if response.startswith(b'(NAK'):
+                return True, True
+            return False, False
+            
+        # Extract CRC if present (last 3 bytes should be CRC + \r)
+        if len(response) > 4:
+            data = response[:-3]
+            received_crc = response[-3:-1]
+            calculated_crc = calculate_crc(data)
+            return True, (received_crc == calculated_crc)
+            
+        return True, False
 
-SAFE_COMMANDS = [
-    "PI",   # Protocol inquiry
-    "GS",   # General status
-    "MOD",  # Mode inquiry
-    "PIRI", # Rating information
-]
+    def _test_protocol_command(self, cmd: str) -> Tuple[bool, bool, bytes]:
+        """Test a specific protocol command."""
+        cmd_bytes = format_command(cmd)
+        response = self._send_command(cmd_bytes)
+        
+        if not response:
+            return False, False, b''
+            
+        valid_format, valid_crc = self._validate_response(response)
+        return valid_format, valid_crc, response
 
+    def detect(self) -> Dict[str, any]:
+        results = {
+            'recommended_protocol': None,
+            'baud_rate': None,
+            'serial_config': None,
+            'valid_format_responses': 0,
+            'valid_crc_responses': 0,
+            'any_responses': 0,
+            'sample_responses': {},
+            'best_config': None
+        }
 
-def try_command(
-    ser: serial.Serial,
-    proto_name: str,
-    proto_obj,
-    cmd: str,
-    read_bytes: int,
-    line_ending: bytes,
-) -> Tuple[bool, bool, bytes]:
-    """Send one command using protocol's get_full_command, return tuple:
-    (got_any_response, got_data_response, raw_bytes)
-    - got_any_response: any bytes received
-    - got_data_response: not a pure ACK/NAK control token; likely data (e.g., starts with ^D or contains payload)
-    """
-    try:
-        full = proto_obj.get_full_command(cmd)
-        if not full:
-            return (False, False, b"")
-        # Adjust line ending if needed
-        if full.endswith(b"\r") and line_ending != b"\r":
-            full = full[:-1] + line_ending
-        # Clear input buffer, write command
-        ser.reset_input_buffer()
-        ser.write(full)
-        ser.flush()
-        # Small wait for device to respond
-        time.sleep(0.2)
-        resp = ser.read(read_bytes)
-        if not resp:
-            return (False, False, b"")
-        # Heuristic classification
-        # ACK patterns for PI18 family commonly are b"^1\x0b\xc2\r"; NAK b"^0\x1b\xe3\r"
-        is_ack = resp.startswith(b"^1") and resp.endswith(b"\r") and len(resp) <= 6
-        is_nak = resp.startswith(b"^0") and resp.endswith(b"\r") and len(resp) <= 6
-        is_data = (not is_ack) and (not is_nak)
-        return (True, is_data, resp)
-    except Exception:
-        return (False, False, b"")
+        for baud in self.baud_rates:
+            for config in self.serial_configs:
+                if not self._open_serial(baud, *config):
+                    continue
+                    
+                logging.info(f"Testing baud={baud}, config={config}")
+                
+                valid_format_count = 0
+                valid_crc_count = 0
+                any_responses = 0
+                responses = {}
+                
+                for cmd in self.test_commands:
+                    valid_format, valid_crc, response = self._test_protocol_command(cmd)
+                    
+                    if response:
+                        any_responses += 1
+                        try:
+                            responses[cmd] = response.decode('ascii', errors='replace')
+                        except:
+                            responses[cmd] = str(response)
+                            
+                    if valid_format:
+                        valid_format_count += 1
+                    if valid_crc:
+                        valid_crc_count += 1
 
+                # Update results if this config is better
+                if (valid_format_count > results['valid_format_responses'] or 
+                    valid_crc_count > results['valid_crc_responses']):
+                    results.update({
+                        'baud_rate': baud,
+                        'serial_config': config,
+                        'valid_format_responses': valid_format_count,
+                        'valid_crc_responses': valid_crc_count,
+                        'any_responses': any_responses,
+                        'sample_responses': responses,
+                        'best_config': {
+                            'baud': baud,
+                            'bytesize': config[0],
+                            'parity': config[1],
+                            'stopbits': config[2]
+                        }
+                    })
+                    
+                    # If we got valid protocol responses, this is likely PI18SV
+                    if valid_format_count > 0:
+                        results['recommended_protocol'] = 'PI18SV'
 
-def score_protocol_on_baud(
-    port: str,
-    baud: int,
-    timeout: float,
-    read_bytes: int,
-    proto_name: str,
-    proto_cls,
-    bytesize: int,
-    parity: str,
-    stopbits: float,
-    rs485: bool,
-    line_ending: bytes,
-) -> dict:
-    result = {
-        "proto": proto_name,
-        "baud": baud,
-        "bytesize": bytesize,
-        "parity": parity,
-        "stopbits": stopbits,
-        "rs485": rs485,
-        "eol": "CRLF" if line_ending == b"\r\n" else "CR",
-        "any": 0,        # num commands with any response
-        "data": 0,       # num commands with data-like response
-        "samples": [],   # (cmd, hex/printable snippet)
-    }
-    try:
-        with serial.Serial(port, baudrate=baud, timeout=timeout) as ser:
-            ser.bytesize = bytesize
-            ser.parity = parity
-            ser.stopbits = stopbits
-            if rs485:
-                try:
-                    ser.rs485_mode = RS485Settings(True, delay_before_tx=0.0, delay_before_rx=0.01)
-                except Exception:
-                    pass
-            proto = proto_cls()
-            for cmd in SAFE_COMMANDS:
-                got_any, got_data, raw = try_command(ser, proto_name, proto, cmd, read_bytes, line_ending)
-                if got_any:
-                    result["any"] += 1
-                if got_data:
-                    result["data"] += 1
-                if raw:
-                    snippet = raw[:64]
-                    try:
-                        # Attempt a readable snippet
-                        preview = snippet.decode(errors="replace")
-                    except Exception:
-                        preview = snippet.hex()
-                    result["samples"].append((cmd, preview))
-                else:
-                    result["samples"].append((cmd, "<no response>"))
-    except Exception as exc:
-        result["error"] = str(exc)
-    return result
+                self.serial.close()
 
-
-def pick_best(results: List[dict]) -> Optional[dict]:
-    if not results:
-        return None
-    # Sort by: highest data responses, then any responses,
-    # then prefer CR over CRLF, RS485 enabled, and lower baud
-    return sorted(
-        results,
-        key=lambda r: (
-            r.get("data", 0),
-            r.get("any", 0),
-            1 if r.get("eol") == "CR" else 0,
-            1 if r.get("rs485") else 0,
-            -r.get("baud", 0),
-        ),
-        reverse=True,
-    )[0]
-
+        return results
 
 def main():
-    parser = argparse.ArgumentParser(description="Detect best protocol and serial settings for PI18-family inverters.")
-    parser.add_argument("--port", default="/dev/ttyUSB0", help="Serial port (default: /dev/ttyUSB0)")
-    parser.add_argument("--timeout", type=float, default=1.0, help="Serial read timeout in seconds (default: 1.0)")
-    parser.add_argument("--read-bytes", type=int, default=200, help="Max bytes to read per command (default: 200)")
-    parser.add_argument(
-        "--baud-list",
-        default="2400,4800,9600,19200,38400,57600,115200",
-        help="Comma-separated baud list to try",
-    )
-    parser.add_argument("--try-parity", default="N,E", help="Comma list of parities to try (N,E) (default: N,E)")
-    parser.add_argument("--try-bytesize", default="8,7", help="Comma list of bytesizes to try (default: 8,7)")
-    parser.add_argument("--try-stopbits", default="1", help="Comma list of stopbits to try (default: 1)")
-    parser.add_argument("--try-eol", default="CR,CRLF", help="Line endings to try (CR,CRLF) (default: CR,CRLF)")
-    parser.add_argument("--try-rs485", action="store_true", help="Also try RS485 mode on")
-    args = parser.parse_args()
-
-    try:
-        baud_list = [int(b.strip()) for b in args.baud_list.split(",") if b.strip()]
-    except Exception:
-        print("✗ Invalid --baud-list")
-        return 2
-
-    print("🚀 Detecting inverter protocol and serial settings")
-    print("=" * 60)
-    print(f"📁 Port: {args.port}")
-    print(f"⏱  Timeout: {args.timeout}s")
-    print(f"🔢 Bauds: {baud_list}")
-    print()
-
-    protos = load_protocols()
-    all_results: List[dict] = []
-    # Build option spaces
-    parity_map = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN}
-    bytesize_map = {"8": serial.EIGHTBITS, "7": serial.SEVENBITS}
-    stopbits_map = {"1": serial.STOPBITS_ONE, "2": serial.STOPBITS_TWO}
-    eol_map = {"CR": b"\r", "CRLF": b"\r\n"}
-
-    try_parities = [parity_map.get(p.strip(), serial.PARITY_NONE) for p in args.try_parity.split(",")]
-    try_bytesizes = [bytesize_map.get(b.strip(), serial.EIGHTBITS) for b in args.try_bytesize.split(",")]
-    try_stopbits = [stopbits_map.get(s.strip(), serial.STOPBITS_ONE) for s in args.try_stopbits.split(",")]
-    try_eols = [eol_map.get(e.strip(), b"\r") for e in args.try_eol.split(",")]
-
-    for baud in baud_list:
-        for pname, pcls in protos:
-            for bs in try_bytesizes:
-                for par in try_parities:
-                    for sb in try_stopbits:
-                        for eol in try_eols:
-                            for rs485 in ([False, True] if args.try_rs485 else [False]):
-                                label_eol = "CRLF" if eol == b"\r\n" else "CR"
-                                par_label = "E" if par == serial.PARITY_EVEN else "N"
-                                rs485_label = "ON" if rs485 else "OFF"
-                                print(f"→ {pname} @ {baud} baud, {bs}{par_label}{int(sb)} eol={label_eol} rs485={rs485_label}")
-                                res = score_protocol_on_baud(
-                                    port=args.port,
-                                    baud=baud,
-                                    timeout=args.timeout,
-                                    read_bytes=args.read_bytes,
-                                    proto_name=pname,
-                                    proto_cls=pcls,
-                                    bytesize=bs,
-                                    parity=par,
-                                    stopbits=sb,
-                                    rs485=rs485,
-                                    line_ending=eol,
-                                )
-                                if "error" in res:
-                                    print(f"  ✗ Error: {res['error']}")
-                                else:
-                                    print(f"  ✓ Any responses:  {res['any']}")
-                                    print(f"  ✓ Data responses: {res['data']}")
-                                    for cmd, preview in res["samples"]:
-                                        print(f"    - {cmd}: {preview}")
-                                all_results.append(res)
-                                print()
-
-    best = pick_best(all_results)
-    print("=" * 60)
-    print("📊 Detection Summary")
-    print("=" * 60)
-    if not best:
-        print("✗ No viable responses detected. Check wiring/port/baud and retry.")
-        return 1
-
-    print(f"🏆 Recommended: Protocol={best['proto']}  Baud={best['baud']}  Config={best.get('bytesize','?')}{'E' if best.get('parity')==serial.PARITY_EVEN else 'N'}{int(best.get('stopbits',1))}  RS485={'ON' if best.get('rs485') else 'OFF'}  EOL={best.get('eol')}")
-    print(f"   Data responses: {best.get('data', 0)}  Any responses: {best.get('any', 0)}")
-    print("   Sample responses:")
-    for cmd, preview in best.get("samples", [])[:4]:
-        print(f"     • {cmd}: {preview}")
-
-    print()
-    print("✅ Next steps:")
-    print(f"  • Run service directly: /data/etc/dbus-mppsolar/start-dbus-mppsolar.sh {os.path.basename(args.port)}")
-    print("  • If needed, update dbus-mppsolar to use the recommended protocol in its logic.")
-    return 0
-
+    print("🔍 Enhanced Protocol Detection Tool")
+    print("==================================")
+    
+    detector = ProtocolDetector("/dev/ttyUSB0")
+    results = detector.detect()
+    
+    print("\n📊 Detection Results:")
+    print(f"Recommended Protocol: {results['recommended_protocol']}")
+    print(f"Best Configuration:")
+    print(f"  Baud Rate: {results['baud_rate']}")
+    print(f"  Serial Config: Bytesize={results['best_config']['bytesize']}, "
+          f"Parity={results['best_config']['parity']}, "
+          f"Stopbits={results['best_config']['stopbits']}")
+    print(f"\nResponse Statistics:")
+    print(f"  Valid Format Responses: {results['valid_format_responses']}")
+    print(f"  Valid CRC Responses: {results['valid_crc_responses']}")
+    print(f"  Total Responses: {results['any_responses']}")
+    
+    print("\nSample Responses:")
+    for cmd, response in results['sample_responses'].items():
+        print(f"• {cmd}: {response}")
 
 if __name__ == "__main__":
-    sys.exit(main())
-
-
+    main()
