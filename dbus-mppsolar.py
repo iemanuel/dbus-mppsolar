@@ -36,38 +36,22 @@ if USE_SYSTEM_MPPSOLAR:
     try:
         import mppsolar
     except:
-        USE_SYSTEM_MPPSOLAR = False
+        USE_SYSTEM_MPPSOLAR = FALSE
 if not USE_SYSTEM_MPPSOLAR:
     sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'mpp-solar'))
     import mppsolar
 
 # Inverter commands to read from the serial
-def runInverterCommands(commands, protocol="PI18SV"):
+def runInverterCommands(commands, protocol="PI30"):
     global args
     global mainloop
-    parsed = []
     if USE_SYSTEM_MPPSOLAR:
-        for c in commands:
-            try:
-                o = sp.getoutput("mpp-solar -b {} -P {} -p {} -o json -c {}".format(args.baudrate, protocol, args.serial, c)).split('\n')[0]
-                parsed.append(json.loads(o))
-            except Exception as e:
-                logging.warning(f"Command {c} failed via CLI: {e}")
-                parsed.append({"_command": c, "error": str(e)})
+        output = [sp.getoutput("mpp-solar -b {} -P {} -p {} -o json -c {}".format(args.baudrate, protocol, args.serial, c)).split('\n')[0] for c in commands]
+        parsed = [json.loads(o) for o in output]
     else:
         dev = mppsolar.helpers.get_device_class("mppsolar")(port=args.serial, protocol=protocol, baud=args.baudrate)
-        for c in commands:
-            try:
-                r = dev.run_command(command=c)
-                j = mppsolar.outputs.to_json(r, False, None, None)
-                # Some drivers may bubble dict errors; normalize to dict and continue
-                if isinstance(j, dict):
-                    parsed.append(j)
-                else:
-                    parsed.append({"_command": c, "raw": j})
-            except Exception as e:
-                logging.warning(f"Command {c} failed on protocol {protocol}: {e}")
-                parsed.append({"_command": c, "error": str(e)})
+        results = [dev.run_command(command=c) for c in commands]
+        parsed = [mppsolar.outputs.to_json(r, False, None, None) for r in results]           
     return parsed
 
 def setOutputSource(source):
@@ -115,45 +99,25 @@ class DbusMppSolarService(object):
 
         # Try to get the protocol version of the inverter
         try:
-            self._invProtocol = runInverterCommands(['QPI'])[0].get('protocol_id', 'PI18SV')
+            self._invProtocol = runInverterCommands(['QPI'])[0].get('protocol_id', 'PI30')
         except:
             try:
-                pi_result = runInverterCommands(['PI'])[0].get('protocol_id', 'PI17')
-                # Check if this is an InfiniSolar V (P18 protocol)
-                if pi_result == '18':
-                    self._invProtocol = 'PI18SV'  # Use PI18SV for InfiniSolar V series
-                else:
-                    self._invProtocol = pi_result
+                self._invProtocol = runInverterCommands(['PI'])[0].get('protocol_id', 'PI17')
             except:
-                logging.error("Protocol detection error, defaulting to PI18SV")
-                self._invProtocol = "PI18SV"
+                logging.error("Protocol detection error, will probably fail now in the next steps")
+                self._invProtocol = "QPI"
         
         # Refine the protocol received, it may be the inverter is lying
         if self._invProtocol == 'PI30':
-            # User preference: treat PI30-class devices using PI18SV logic by default
-            logging.warning("Protocol reported PI30; overriding to PI18SV by configuration")
-            self._invProtocol = 'PI18SV'
+            try:
+                raw = runInverterCommands(['QPIGS','QMOD','QPIWS']) 
+            except:
+                logging.warning(f"Protocol PI30 is failing, switching to PI30MAX")
+                self._invProtocol = 'PI30MAX'
 
         # Get inverter data based on protocol
         if self._invProtocol == 'PI17':
             self._invData = runInverterCommands(['ID','VFW'], self._invProtocol)
-        elif self._invProtocol == 'PI18SV':
-            self._invData = runInverterCommands(['ID','VFW'], self._invProtocol)
-            # Detect parallel/3-phase by probing PGS0/1/2 (more reliable than PRI0)
-            phases_probe = runInverterCommands(['PGS0', 'PGS1', 'PGS2'], self._invProtocol)
-            phase_ok = [isinstance(p, dict) and p.get('ac_output_voltage') is not None for p in phases_probe]
-            num_ok = sum(1 for ok in phase_ok if ok)
-            if num_ok >= 2:
-                self._isParallel = True
-                if num_ok == 3:
-                    self._phaseMode = '3-phase parallel'
-                else:
-                    self._phaseMode = 'parallel'
-                logging.warning(f"PI18SV parallel configuration detected: {self._phaseMode} ({num_ok} phases responding)")
-            else:
-                self._isParallel = False
-                self._phaseMode = 'Single mode'
-                logging.warning("PI18SV running in single mode")
         elif self._invProtocol == 'PI30' or self._invProtocol == 'PI30MAX':
             self._invData = runInverterCommands(['QID','QVFW'], self._invProtocol)
         else:
@@ -174,49 +138,25 @@ class DbusMppSolarService(object):
         self.setupDefaultPaths(self._dbusmulti, connection, deviceinstance, f"Inverter {productname}")
         self.setupDefaultPaths(self._dbusvebus, connection, deviceinstance, f"Vebus {productname}")
 
-        # Create paths for 'multi' - enhanced for 3-phase support
+        # Create paths for 'multi'
         self._dbusmulti.add_path('/Ac/In/1/L1/V', 0)
         self._dbusmulti.add_path('/Ac/In/1/L1/I', 0)
         self._dbusmulti.add_path('/Ac/In/1/L1/P', 0)
         self._dbusmulti.add_path('/Ac/In/1/L1/F', 0)
+        #self._dbusmulti.add_path('/Ac/In/2/L1/V', 0)
+        #self._dbusmulti.add_path('/Ac/In/2/L1/I', 0)
+        #self._dbusmulti.add_path('/Ac/In/2/L1/P', 0)
+        #self._dbusmulti.add_path('/Ac/In/2/L1/F', 0)
         self._dbusmulti.add_path('/Ac/Out/L1/V', 0)
         self._dbusmulti.add_path('/Ac/Out/L1/I', 0)
         self._dbusmulti.add_path('/Ac/Out/L1/P', 0)
         self._dbusmulti.add_path('/Ac/Out/L1/S', 0)
         self._dbusmulti.add_path('/Ac/Out/L1/F', 0)
-        
-        # Add 3-phase paths for PI18SV parallel systems
-        if hasattr(self, '_isParallel') and self._isParallel:
-            # L2 and L3 paths for 3-phase systems
-            self._dbusmulti.add_path('/Ac/In/1/L2/V', 0)
-            self._dbusmulti.add_path('/Ac/In/1/L2/I', 0)
-            self._dbusmulti.add_path('/Ac/In/1/L2/P', 0)
-            self._dbusmulti.add_path('/Ac/In/1/L2/F', 0)
-            self._dbusmulti.add_path('/Ac/In/1/L3/V', 0)
-            self._dbusmulti.add_path('/Ac/In/1/L3/I', 0)
-            self._dbusmulti.add_path('/Ac/In/1/L3/P', 0)
-            self._dbusmulti.add_path('/Ac/In/1/L3/F', 0)
-            
-            self._dbusmulti.add_path('/Ac/Out/L2/V', 0)
-            self._dbusmulti.add_path('/Ac/Out/L2/I', 0)
-            self._dbusmulti.add_path('/Ac/Out/L2/P', 0)
-            self._dbusmulti.add_path('/Ac/Out/L2/S', 0)
-            self._dbusmulti.add_path('/Ac/Out/L2/F', 0)
-            self._dbusmulti.add_path('/Ac/Out/L3/V', 0)
-            self._dbusmulti.add_path('/Ac/Out/L3/I', 0)
-            self._dbusmulti.add_path('/Ac/Out/L3/P', 0)
-            self._dbusmulti.add_path('/Ac/Out/L3/S', 0)
-            self._dbusmulti.add_path('/Ac/Out/L3/F', 0)
-            
-            # Set number of phases to 3 for parallel systems
-            self._dbusmulti.add_path('/Ac/NumberOfPhases', 3)
-        else:
-            # Single phase
-            self._dbusmulti.add_path('/Ac/NumberOfPhases', 1)
         self._dbusmulti.add_path('/Ac/In/1/Type', 1) #0=Unused;1=Grid;2=Genset;3=Shore
         #self._dbusmulti.add_path('/Ac/In/2/Type', 1) #0=Unused;1=Grid;2=Genset;3=Shore
         self._dbusmulti.add_path('/Ac/In/1/CurrentLimit', 20)
         #self._dbusmulti.add_path('/Ac/In/2/CurrentLimit', 20)
+        self._dbusmulti.add_path('/Ac/NumberOfPhases', 1)
         self._dbusmulti.add_path('/Ac/ActiveIn/ActiveInput', 0)
         self._dbusmulti.add_path('/Ac/ActiveIn/Type', 1)
         self._dbusmulti.add_path('/Dc/0/Voltage', 0)
@@ -267,7 +207,7 @@ class DbusMppSolarService(object):
         self._dbusmulti.add_path('/Alarms/GridLost', 0)
         self._dbusmulti.add_path('/Alarms/Connection', 0)
            
-        # Create paths for 'vebus' - enhanced for 3-phase support
+        # Create paths for 'vebus'
         self._dbusvebus.add_path('/Ac/ActiveIn/L1/F', 0)
         self._dbusvebus.add_path('/Ac/ActiveIn/L1/I', 0)
         self._dbusvebus.add_path('/Ac/ActiveIn/L1/V', 0)
@@ -281,35 +221,7 @@ class DbusMppSolarService(object):
         self._dbusvebus.add_path('/Ac/Out/L1/P', 0)
         self._dbusvebus.add_path('/Ac/Out/L1/S', 0)
         self._dbusvebus.add_path('/Ac/Out/L1/F', 0)
-        
-        # Add 3-phase paths for PI18SV parallel systems
-        if hasattr(self, '_isParallel') and self._isParallel:
-            # L2 and L3 paths for vebus 3-phase
-            self._dbusvebus.add_path('/Ac/ActiveIn/L2/F', 0)
-            self._dbusvebus.add_path('/Ac/ActiveIn/L2/I', 0)
-            self._dbusvebus.add_path('/Ac/ActiveIn/L2/V', 0)
-            self._dbusvebus.add_path('/Ac/ActiveIn/L2/P', 0)
-            self._dbusvebus.add_path('/Ac/ActiveIn/L2/S', 0)
-            self._dbusvebus.add_path('/Ac/ActiveIn/L3/F', 0)
-            self._dbusvebus.add_path('/Ac/ActiveIn/L3/I', 0)
-            self._dbusvebus.add_path('/Ac/ActiveIn/L3/V', 0)
-            self._dbusvebus.add_path('/Ac/ActiveIn/L3/P', 0)
-            self._dbusvebus.add_path('/Ac/ActiveIn/L3/S', 0)
-            
-            self._dbusvebus.add_path('/Ac/Out/L2/V', 0)
-            self._dbusvebus.add_path('/Ac/Out/L2/I', 0)
-            self._dbusvebus.add_path('/Ac/Out/L2/P', 0)
-            self._dbusvebus.add_path('/Ac/Out/L2/S', 0)
-            self._dbusvebus.add_path('/Ac/Out/L2/F', 0)
-            self._dbusvebus.add_path('/Ac/Out/L3/V', 0)
-            self._dbusvebus.add_path('/Ac/Out/L3/I', 0)
-            self._dbusvebus.add_path('/Ac/Out/L3/P', 0)
-            self._dbusvebus.add_path('/Ac/Out/L3/S', 0)
-            self._dbusvebus.add_path('/Ac/Out/L3/F', 0)
-            
-            self._dbusvebus.add_path('/Ac/NumberOfPhases', 3)
-        else:
-            self._dbusvebus.add_path('/Ac/NumberOfPhases', 1)
+        self._dbusvebus.add_path('/Ac/NumberOfPhases', 1)
         self._dbusvebus.add_path('/Dc/0/Voltage', 0)
         self._dbusvebus.add_path('/Dc/0/Current', 0)
         self._dbusvebus.add_path('/Ac/In/1/CurrentLimit', 20, writeable=True, onchangecallback=self._change)
@@ -374,7 +286,7 @@ class DbusMppSolarService(object):
         self._connectToDc()
         logging.info("{} updating".format(datetime.datetime.now().time()))
         try: 
-            if self._invProtocol in ('PI30','PI30MAX','PI18','PI18SV'):
+            if self._invProtocol == 'PI30' or self._invProtocol == 'PI30MAX':
                 return self._update_PI30()
             elif self._invProtocol == 'PI17':
                 return self._update_PI17()
@@ -393,7 +305,7 @@ class DbusMppSolarService(object):
             mainloop.quit()
             exit
         try: 
-            if self._invProtocol in ('PI30','PI30MAX','PI18','PI18SV'):
+            if self._invProtocol == 'PI30' or  self._invProtocol == 'PI30MAX':
                 return self._change_PI30(path, value)
             elif self._invProtocol == 'PI17':
                 return self._change_PI17(path, value)
@@ -405,20 +317,8 @@ class DbusMppSolarService(object):
             return False
 
     def _update_PI30(self):
-        # Rewritten: Use PI18SV logic as the unified path for PI30/PI18-class
-        # Single-phase uses GS; parallel uses PGS0/1/2
-        # We also avoid MOD for stability and infer state heuristically
-        if hasattr(self, '_isParallel') and self._isParallel:
-            raw = runInverterCommands(['PGS0', 'PGS1', 'PGS2'], self._invProtocol)
-            phase1_data = raw[0] if len(raw) > 0 and isinstance(raw[0], dict) else {}
-            phase2_data = raw[1] if len(raw) > 1 and isinstance(raw[1], dict) else {}
-            phase3_data = raw[2] if len(raw) > 2 and isinstance(raw[2], dict) else {}
-            data = phase1_data
-            warnings = {}
-        else:
-            raw = runInverterCommands(['GS'], self._invProtocol)
-            data = raw[0] if len(raw) > 0 and isinstance(raw[0], dict) else {}
-            warnings = {}
+        raw = runInverterCommands(['QPIGS','QMOD','QPIWS']) 
+        data, mode, warnings = raw
         dcSystem = None
         if  self._systemDcPower != None:
             dcSystem = self._systemDcPower.get_value()
@@ -431,21 +331,18 @@ class DbusMppSolarService(object):
                 m['/Alarms/Connection'] = 2
             
             # 0=Off;1=Low Power;2=Fault;3=Bulk;4=Absorption;5=Float;6=Storage;7=Equalize;8=Passthru;9=Inverting;10=Power assist;11=Power supply;252=External control
-            # Heuristic mapping similar to PI18SV
-            charging_ac_current = data.get('battery_charging_current', 0) or 0
-            ac_in_v = data.get('ac_input_voltage') or 0
-            ac_out_v = data.get('ac_output_voltage') or 0
-            active_power = data.get('ac_output_active_power') or 0
-            load_connected = data.get('load_connection', None) == 'connect'
-
-            if charging_ac_current > 0:
-                m['/State'] = 3  # Bulk charging
-            elif active_power > 0 or (load_connected and ac_out_v):
-                m['/State'] = 9  # Inverting
-            elif ac_in_v:
-                m['/State'] = 8  # Passthru
+            invMode = mode.get('device_mode', None)
+            if invMode == 'Battery':
+                m['/State'] = 9 # Inverting
+            elif invMode == 'Line':
+                if data.get('is_charging_on', 0) == 1:
+                    m['/State'] = 3 # Passthru + Charging? = Bulk
+                else:    
+                    m['/State'] = 8 # Passthru
+            elif invMode == 'Standby':
+                m['/State'] = data.get('is_charging_on', 0) * 6 # Standby = 0 -> OFF, Stanby + Charging = 6 -> "Storage" Storing power
             else:
-                m['/State'] = 0  # Off/unknown
+                m['/State'] = 0 # OFF
             v['/State'] = m['/State']
 
             # Normal operation, read data
@@ -709,155 +606,6 @@ class DbusMppSolarService(object):
         #     self._queued_updates.append((path, value))
         
         return True # accept the change
-
-    def _update_PI18SV(self):
-        # PI18SV uses different commands for single vs parallel systems
-        if hasattr(self, '_isParallel') and self._isParallel:
-            # Use PGS for parallel systems - query each phase (avoid MOD for stability)
-            raw = runInverterCommands(['PGS0', 'PGS1', 'PGS2'], self._invProtocol)
-            # If any command failed, default to empty dicts
-            phase1_data = raw[0] if len(raw) > 0 and isinstance(raw[0], dict) else {}
-            phase2_data = raw[1] if len(raw) > 1 and isinstance(raw[1], dict) else {}
-            phase3_data = raw[2] if len(raw) > 2 and isinstance(raw[2], dict) else {}
-            data = phase1_data  # Use phase 1 as primary for common values
-            invMode = None
-        else:
-            # Use GS for single systems (avoid MOD for stability)
-            raw = runInverterCommands(['GS'], self._invProtocol)
-            data = raw[0] if len(raw) > 0 and isinstance(raw[0], dict) else {}
-            invMode = None
-            
-        dcSystem = None
-        if self._systemDcPower != None:
-            dcSystem = self._systemDcPower.get_value()
-        logging.debug(dcSystem)
-        logging.debug(raw)
-        
-        with self._dbusmulti as m, self._dbusvebus as v:
-            # Handle connection errors
-            if 'error' in data and 'short' in data['error']:
-                m['/State'] = 0
-                m['/Alarms/Connection'] = 2
-                return True
-            
-            # Map PI18SV working modes to dbus states
-            # If MOD not queried or failed, infer from GS data heuristically
-            if invMode is None:
-                charging_current = data.get('battery_charging_current', 0) or 0
-                ac_in_v = data.get('ac_input_voltage') or 0
-                ac_out_v = data.get('ac_output_voltage') or 0
-                active_power = data.get('ac_output_active_power') or 0
-                load_connected = data.get('load_connection', None) == 'connect'
-
-                if charging_current > 0:
-                    m['/State'] = 3  # Bulk charging
-                elif active_power > 0 or (load_connected and ac_out_v):
-                    m['/State'] = 9  # Inverting
-                elif ac_in_v:
-                    m['/State'] = 8  # Passthru
-                else:
-                    m['/State'] = 0  # Off/unknown
-            else:
-                if invMode == 'Battery mode':
-                    m['/State'] = 9 # Inverting
-                elif invMode == 'Hybrid mode(Line mode, Grid mode)':
-                    if data.get('battery_charging_current', 0) > 0:
-                        m['/State'] = 3 # Bulk charging
-                    else:    
-                        m['/State'] = 8 # Passthru
-                elif invMode == 'Standby mode':
-                    m['/State'] = 6 if data.get('battery_charging_current', 0) > 0 else 0
-                elif invMode == 'Fault mode':
-                    m['/State'] = 2 # Fault
-                else:
-                    m['/State'] = 0 # OFF
-            v['/State'] = m['/State']
-
-            # Battery data (same for all phases)
-            v['/Dc/0/Voltage'] = m['/Dc/0/Voltage'] = data.get('battery_voltage', None)
-            m['/Dc/0/Current'] = -data.get('battery_discharge_current', 0)
-            v['/Dc/0/Current'] = -m['/Dc/0/Current']
-            charging_ac_current = data.get('battery_charging_current', 0)
-            load_connected = data.get('load_connection', None) == 'connect'
-            
-            if hasattr(self, '_isParallel') and self._isParallel:
-                # Handle 3-phase parallel data
-                phases = [phase1_data, phase2_data, phase3_data]
-                phase_names = ['L1', 'L2', 'L3']
-                
-                total_out_power = 0
-                total_in_power = 0
-                
-                for i, (phase_data, phase_name) in enumerate(zip(phases, phase_names)):
-                    # AC Output data per phase
-                    v[f'/Ac/Out/{phase_name}/V'] = m[f'/Ac/Out/{phase_name}/V'] = phase_data.get('ac_output_voltage', None)
-                    v[f'/Ac/Out/{phase_name}/F'] = m[f'/Ac/Out/{phase_name}/F'] = phase_data.get('ac_output_frequency', None)
-                    v[f'/Ac/Out/{phase_name}/P'] = m[f'/Ac/Out/{phase_name}/P'] = phase_data.get('ac_output_active_power', None)
-                    v[f'/Ac/Out/{phase_name}/S'] = m[f'/Ac/Out/{phase_name}/S'] = phase_data.get('ac_output_apparent_power', None)
-                    
-                    # AC Input (Grid) data per phase
-                    v[f'/Ac/ActiveIn/{phase_name}/V'] = m[f'/Ac/In/1/{phase_name}/V'] = phase_data.get('grid_voltage', None)
-                    v[f'/Ac/ActiveIn/{phase_name}/F'] = m[f'/Ac/In/1/{phase_name}/F'] = phase_data.get('grid_frequency', None)
-                    
-                    # Calculate AC input power per phase
-                    phase_out_power = phase_data.get('ac_output_active_power', 0)
-                    if m['/State'] == 0:
-                        phase_in_power = None
-                    else:
-                        phase_in_power = 0 if invMode == 'Battery mode' else phase_out_power
-                        # Add charging power (distributed across phases)
-                        phase_in_power = (phase_in_power or 0) + (charging_ac_current * m['/Dc/0/Voltage'] / 3 if charging_ac_current > 0 else 0)
-                    
-                    v[f'/Ac/ActiveIn/{phase_name}/P'] = m[f'/Ac/In/1/{phase_name}/P'] = phase_in_power
-                    
-                    # Accumulate totals
-                    if phase_out_power:
-                        total_out_power += phase_out_power
-                    if phase_in_power:
-                        total_in_power += phase_in_power
-                        
-            else:
-                # Single phase handling
-                v['/Ac/Out/L1/V'] = m['/Ac/Out/L1/V'] = data.get('ac_output_voltage', None)
-                v['/Ac/Out/L1/F'] = m['/Ac/Out/L1/F'] = data.get('ac_output_frequency', None)
-                v['/Ac/Out/L1/P'] = m['/Ac/Out/L1/P'] = data.get('ac_output_active_power', None)
-                v['/Ac/Out/L1/S'] = m['/Ac/Out/L1/S'] = data.get('ac_output_apparent_power', None)
-
-                v['/Ac/ActiveIn/L1/V'] = m['/Ac/In/1/L1/V'] = data.get('grid_voltage', None)
-                v['/Ac/ActiveIn/L1/F'] = m['/Ac/In/1/L1/F'] = data.get('grid_frequency', None)
-
-                # Calculate AC input power
-                if m['/State'] == 0:
-                    m['/Ac/In/1/L1/P'] = None
-                else:
-                    m['/Ac/In/1/L1/P'] = 0 if invMode == 'Battery mode' else m['/Ac/Out/L1/P']
-                    m['/Ac/In/1/L1/P'] = (m['/Ac/In/1/L1/P'] or 0) + (charging_ac_current * m['/Dc/0/Voltage'] if charging_ac_current > 0 else 0)
-                v['/Ac/ActiveIn/L1/P'] = m['/Ac/In/1/L1/P']
-
-            # Solar PV data - PI18SV supports dual PV inputs
-            pv1_power = data.get('pv1_input_power', 0)
-            pv2_power = data.get('pv2_input_power', 0)
-            total_pv_power = pv1_power + pv2_power
-            
-            m['/Pv/0/V'] = data.get('pv1_input_voltage', None)
-            m['/Pv/0/P'] = total_pv_power if total_pv_power > 0 else None
-            m['/MppOperationMode'] = 2 if total_pv_power > 0 else 0
-            
-            # Update DC current with charging
-            m['/Dc/0/Current'] = m['/Dc/0/Current'] + (charging_ac_current if charging_ac_current > 0 else 0)
-
-            # Temperature
-            m['/Temperature'] = data.get('inverter_heat_sink_temperature', None)
-
-            # Basic alarm handling
-            m['/Alarms/Connection'] = 0
-            
-            # Execute queued updates
-            self._updateInternal()
-
-        logging.info("{} PI18SV update done ({})".format(datetime.datetime.now().time(), 
-                     "3-phase parallel" if hasattr(self, '_isParallel') and self._isParallel else "single phase"))
-        return True
 
 def main():
     parser = argparse.ArgumentParser()
