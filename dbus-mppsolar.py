@@ -198,42 +198,49 @@ class DbusMppSolarService(object):
         self._tty = tty
         self._queued_updates = []
 
-        # Default to PI18SV, try to detect if different
+        # Default to PI18SV and initialize data
         self._invProtocol = "PI18SV"
+        self._invData = []
+        
         try:
             # Try PI18SV protocol first
-            response = runInverterCommands(['PI'], "PI18SV")[0]
-            if 'error' not in response:
+            response = runInverterCommands(['PI', 'ID', 'VFW'], "PI18SV")
+            if 'error' not in response[0]:
                 logging.info("PI18SV protocol confirmed")
+                self._invData = response
                 return
             
             # If PI18SV fails, try others
             response = runInverterCommands(['QPI'])[0]
             if 'error' not in response:
-                self._invProtocol = response.get('protocol_id', 'PI18SV')
-                logging.info(f"Detected protocol: {self._invProtocol}")
-                return
+                protocol = response.get('protocol_id', 'PI18SV')
+                if protocol != 'PI18SV':
+                    logging.warning(f"Found protocol {protocol}, but forcing PI18SV")
+                self._invProtocol = 'PI18SV'
+                
+            # Get inverter data
+            self._invData = runInverterCommands(['ID', 'VFW'], self._invProtocol)
                 
         except Exception as e:
             logging.warning(f"Protocol detection error: {str(e)}, defaulting to PI18SV")
             self._invProtocol = "PI18SV"
+            # Initialize with empty data if commands fail
+            self._invData = [
+                {"serial_number": "UNKNOWN"},
+                {"main_cpu_firmware_version": "0.0"}
+            ]
         
-        # Refine the protocol received, it may be the inverter is lying
-        if self._invProtocol == 'PI30':
+        # Always use PI18SV protocol
+        if not self._invData:  # If we don't have data yet
             try:
-                raw = runInverterCommands(['QPIGS','QMOD','QPIWS']) 
-            except:
-                logging.warning(f"Protocol PI30 is failing, switching to PI30MAX")
-                self._invProtocol = 'PI30MAX'
-
-        # Get inverter data based on protocol
-        if self._invProtocol == 'PI17':
-            self._invData = runInverterCommands(['ID','VFW'], self._invProtocol)
-        elif self._invProtocol == 'PI30' or self._invProtocol == 'PI30MAX':
-            self._invData = runInverterCommands(['QID','QVFW'], self._invProtocol)
-        else:
-            logging.error(f"Detected inverter on {tty} ({self._invProtocol}), protocol not supported, using PI30 as fallback")       
-            self._invProtocol = 'PI30'
+                self._invData = runInverterCommands(['ID', 'VFW'], 'PI18SV')
+                logging.info(f"Successfully got device info from {tty} using PI18SV protocol")
+            except Exception as e:
+                logging.warning(f"Failed to get device info: {str(e)}, using defaults")
+                self._invData = [
+                    {"serial_number": "UNKNOWN"},
+                    {"main_cpu_firmware_version": "0.0"}
+                ]
         logging.warning(f"Connected to inverter on {tty} ({self._invProtocol}), setting up dbus with /DeviceInstance = {deviceinstance}")
         
         # Create a listener to the DC system power, we need it to give some values
@@ -689,52 +696,101 @@ class DbusMppSolarService(object):
         return True # accept the change
 
     def _update_PI18SV(self):
-        """Update handler for PI18SV protocol with 3-phase support and diagnostic logging."""
+        """Update handler for PI18SV protocol (similar to PI17)."""
         logging.info("Starting PI18SV update cycle")
         try:
-            # Check parallel/3-phase configuration
-            parallel_info = []
-            for i in range(3):  # Check all 3 phases
-                try:
-                    info = runInverterCommands([f'PGS{i}'], self._invProtocol)[0]
-                    if not isinstance(info, dict) or 'error' in info:
-                        continue
-                    parallel_info.append(info)
-                except Exception as e:
-                    logging.debug(f"Phase {i} not present: {str(e)}")
-                    continue
-
-            is_parallel = len(parallel_info) > 1
-            logging.warning(f"PI18SV running in {'parallel' if is_parallel else 'single'} mode")
-
-            # Get general status
-            if is_parallel:
-                # Use parallel status commands
-                raw_data = []
-                for i in range(len(parallel_info)):
-                    try:
-                        phase_data = runInverterCommands([f'PGS{i}', f'PRI{i}'], self._invProtocol)
-                        raw_data.extend(phase_data)
-                    except Exception as e:
-                        logging.error(f"Failed to get phase {i} data: {str(e)}")
-            else:
-                # Use single phase commands
-                try:
-                    raw_data = runInverterCommands(['GS', 'MOD', 'PIRI', 'FWS'], self._invProtocol)
-                except Exception as e:
-                    logging.error(f"Failed to get single phase data: {str(e)}")
-                    raw_data = []
-
-            if not raw_data:
-                logging.error("No valid data received from inverter")
-                return False
-
+            # Use correct PI18SV commands:
+            # GS - Query general status
+            # MOD - Device working mode inquiry
+            # PIRI - Device rated information
+            # FLAG - Query enable/disable flag status
+            raw = runInverterCommands(['GS', 'MOD', 'PIRI', 'FLAG'], self._invProtocol)
+            data, mode, warnings = raw
+            
             with self._dbusmulti as m, self._dbusvebus as v:
-                # Process data based on mode
-                if is_parallel:
-                    self._process_parallel_data(raw_data, m, v)
+                # Handle inverter state
+                if 'error' in data:
+                    m['/State'] = 0
+                    m['/Alarms/Connection'] = 2
+                    return True
+                
+                # Map working mode to state according to PI18SV protocol
+                # 00=Power on mode
+                # 01=Standby mode
+                # 02=Bypass mode
+                # 03=Battery mode
+                # 04=Fault mode
+                # 05=Hybrid mode (Line mode, Grid mode)
+                invMode = mode.get('device_mode', '00')
+                if invMode == '03':  # Battery mode
+                    m['/State'] = 9  # Inverting
+                elif invMode == '05':  # Hybrid/Line mode
+                    if data.get('Battery Charge Current', 0) > 0:
+                        m['/State'] = 3  # Bulk charging
+                    else:    
+                        m['/State'] = 8  # Passthru
+                elif invMode == '02':  # Bypass mode
+                    m['/State'] = 8  # Passthru
+                elif invMode == '01':  # Standby mode
+                    m['/State'] = data.get('Battery Charge Current', 0) > 0 and 6 or 0  # Storage or Off
+                elif invMode == '04':  # Fault mode
+                    m['/State'] = 2  # Fault
                 else:
-                    self._process_single_data(raw_data, m, v)
+                    m['/State'] = 0  # Off
+                v['/State'] = m['/State']
+
+                # Battery data
+                v['/Dc/0/Voltage'] = m['/Dc/0/Voltage'] = data.get('Battery Voltage')
+                m['/Dc/0/Current'] = -(data.get('Battery Discharge Current', 0) or 0)
+                v['/Dc/0/Current'] = -m['/Dc/0/Current']
+                charging_current = data.get('Battery Charge Current', 0)
+
+                # AC Output data
+                v['/Ac/Out/L1/V'] = m['/Ac/Out/L1/V'] = data.get('AC Output Voltage')
+                v['/Ac/Out/L1/F'] = m['/Ac/Out/L1/F'] = data.get('AC Output Frequency')
+                v['/Ac/Out/L1/P'] = m['/Ac/Out/L1/P'] = data.get('AC Output Active Power')
+                v['/Ac/Out/L1/S'] = m['/Ac/Out/L1/S'] = data.get('AC Output Apparent Power')
+
+                # AC Input data
+                v['/Ac/ActiveIn/L1/V'] = m['/Ac/In/1/L1/V'] = data.get('AC Input Voltage')
+                v['/Ac/ActiveIn/L1/F'] = m['/Ac/In/1/L1/F'] = data.get('AC Input Frequency')
+
+                # Solar/PV data
+                m['/Pv/0/V'] = data.get('PV1 Input Voltage')
+                m['/Pv/0/P'] = data.get('PV1 Input Power')
+                m['/MppOperationMode'] = 2 if (m['/Pv/0/P'] or 0) > 0 else 0
+
+                # Process flags/warnings according to PI18SV protocol
+                # FLAG command returns:
+                # A: Enable/disable silence buzzer or open buzzer
+                # B: Enable/Disable overload bypass function
+                # C: Enable/Disable LCD display escape to default page after 1min timeout
+                # D: Enable/Disable overload restart
+                # E: Enable/Disable over temperature restart
+                # F: Enable/Disable backlight on
+                # G: Enable/Disable alarm on when primary source interrupt
+                # H: Enable/Disable fault code record
+                flags = warnings  # FLAG command response
+                
+                def get_flag(key, default=0):
+                    try:
+                        return int(flags.get(key, default))
+                    except:
+                        return default
+
+                m['/Alarms/Connection'] = 0
+                m['/Alarms/HighTemperature'] = get_flag('E') * 2  # Over temperature restart
+                m['/Alarms/Overload'] = get_flag('D') * 2  # Overload restart
+                m['/Alarms/HighVoltage'] = get_flag('B') * 2  # Overload bypass
+                m['/Alarms/LowVoltage'] = 0  # Not directly available
+                m['/Alarms/HighVoltageAcOut'] = 0  # Not directly available
+                m['/Alarms/LowVoltageAcOut'] = 0  # Not directly available
+                m['/Alarms/HighDcVoltage'] = 0  # Not directly available
+                m['/Alarms/LowDcVoltage'] = 0  # Not directly available
+                m['/Alarms/LineFail'] = get_flag('G') * 2  # Alarm on primary source interrupt
+
+                # Misc
+                m['/Temperature'] = data.get('inverter_heat_sink_temperature')
 
                 # Update internal state
                 self._updateInternal()
