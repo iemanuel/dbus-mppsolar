@@ -42,7 +42,7 @@ if not USE_SYSTEM_MPPSOLAR:
     import mppsolar
 
 # Inverter commands to read from the serial
-def runInverterCommands(commands, protocol="PI30"):
+def runInverterCommands(commands, protocol="PI18SV"):
     global args
     global mainloop
     parsed = []
@@ -125,16 +125,14 @@ class DbusMppSolarService(object):
                 else:
                     self._invProtocol = pi_result
             except:
-                logging.error("Protocol detection error, will probably fail now in the next steps")
-                self._invProtocol = "QPI"
+                logging.error("Protocol detection error, defaulting to PI18SV")
+                self._invProtocol = "PI18SV"
         
         # Refine the protocol received, it may be the inverter is lying
         if self._invProtocol == 'PI30':
-            try:
-                raw = runInverterCommands(['QPIGS','QMOD','QPIWS']) 
-            except:
-                logging.warning(f"Protocol PI30 is failing, switching to PI30MAX")
-                self._invProtocol = 'PI30MAX'
+            # User preference: treat PI30-class devices using PI18SV logic by default
+            logging.warning("Protocol reported PI30; overriding to PI18SV by configuration")
+            self._invProtocol = 'PI18SV'
 
         # Get inverter data based on protocol
         if self._invProtocol == 'PI17':
@@ -376,12 +374,10 @@ class DbusMppSolarService(object):
         self._connectToDc()
         logging.info("{} updating".format(datetime.datetime.now().time()))
         try: 
-            if self._invProtocol == 'PI30' or self._invProtocol == 'PI30MAX':
+            if self._invProtocol in ('PI30','PI30MAX','PI18','PI18SV'):
                 return self._update_PI30()
             elif self._invProtocol == 'PI17':
                 return self._update_PI17()
-            elif self._invProtocol == 'PI18SV':
-                return self._update_PI18SV()
             else:
                 return True #self._update_def()
         except:
@@ -397,12 +393,10 @@ class DbusMppSolarService(object):
             mainloop.quit()
             exit
         try: 
-            if self._invProtocol == 'PI30' or  self._invProtocol == 'PI30MAX':
+            if self._invProtocol in ('PI30','PI30MAX','PI18','PI18SV'):
                 return self._change_PI30(path, value)
             elif self._invProtocol == 'PI17':
                 return self._change_PI17(path, value)
-            elif self._invProtocol == 'PI18SV':
-                return self._change_PI18SV(path, value)
             else:
                 return True #self._change_def()
         except:
@@ -411,8 +405,20 @@ class DbusMppSolarService(object):
             return False
 
     def _update_PI30(self):
-        raw = runInverterCommands(['QPIGS','QMOD','QPIWS']) 
-        data, mode, warnings = raw
+        # Rewritten: Use PI18SV logic as the unified path for PI30/PI18-class
+        # Single-phase uses GS; parallel uses PGS0/1/2
+        # We also avoid MOD for stability and infer state heuristically
+        if hasattr(self, '_isParallel') and self._isParallel:
+            raw = runInverterCommands(['PGS0', 'PGS1', 'PGS2'], self._invProtocol)
+            phase1_data = raw[0] if len(raw) > 0 and isinstance(raw[0], dict) else {}
+            phase2_data = raw[1] if len(raw) > 1 and isinstance(raw[1], dict) else {}
+            phase3_data = raw[2] if len(raw) > 2 and isinstance(raw[2], dict) else {}
+            data = phase1_data
+            warnings = {}
+        else:
+            raw = runInverterCommands(['GS'], self._invProtocol)
+            data = raw[0] if len(raw) > 0 and isinstance(raw[0], dict) else {}
+            warnings = {}
         dcSystem = None
         if  self._systemDcPower != None:
             dcSystem = self._systemDcPower.get_value()
@@ -425,18 +431,21 @@ class DbusMppSolarService(object):
                 m['/Alarms/Connection'] = 2
             
             # 0=Off;1=Low Power;2=Fault;3=Bulk;4=Absorption;5=Float;6=Storage;7=Equalize;8=Passthru;9=Inverting;10=Power assist;11=Power supply;252=External control
-            invMode = mode.get('device_mode', None)
-            if invMode == 'Battery':
-                m['/State'] = 9 # Inverting
-            elif invMode == 'Line':
-                if data.get('is_charging_on', 0) == 1:
-                    m['/State'] = 3 # Passthru + Charging? = Bulk
-                else:    
-                    m['/State'] = 8 # Passthru
-            elif invMode == 'Standby':
-                m['/State'] = data.get('is_charging_on', 0) * 6 # Standby = 0 -> OFF, Stanby + Charging = 6 -> "Storage" Storing power
+            # Heuristic mapping similar to PI18SV
+            charging_ac_current = data.get('battery_charging_current', 0) or 0
+            ac_in_v = data.get('ac_input_voltage') or 0
+            ac_out_v = data.get('ac_output_voltage') or 0
+            active_power = data.get('ac_output_active_power') or 0
+            load_connected = data.get('load_connection', None) == 'connect'
+
+            if charging_ac_current > 0:
+                m['/State'] = 3  # Bulk charging
+            elif active_power > 0 or (load_connected and ac_out_v):
+                m['/State'] = 9  # Inverting
+            elif ac_in_v:
+                m['/State'] = 8  # Passthru
             else:
-                m['/State'] = 0 # OFF
+                m['/State'] = 0  # Off/unknown
             v['/State'] = m['/State']
 
             # Normal operation, read data
@@ -849,51 +858,6 @@ class DbusMppSolarService(object):
         logging.info("{} PI18SV update done ({})".format(datetime.datetime.now().time(), 
                      "3-phase parallel" if hasattr(self, '_isParallel') and self._isParallel else "single phase"))
         return True
-
-    def _change_PI18SV(self, path, value):
-        # PI18SV protocol change handling for InfiniSolar V series
-        if path == '/Ac/In/1/CurrentLimit' or path == '/Ac/In/2/CurrentLimit':
-            # PI18SV uses MUCHGC command for AC charging current
-            logging.warning("setting max AC charging current to = {} (using MUCHGC command)".format(value))
-            try:
-                result = runInverterCommands(['MUCHGC0,{:03d}'.format(int(value))], self._invProtocol)
-                logging.warning("MUCHGC result: {}".format(result))
-            except Exception as e:
-                logging.error("Failed to set AC charging current: {}".format(e))
-            self._queued_updates.append((path, value))
-
-        if path == '/Settings/Charger':
-            # PI18SV uses PCP command for charger priority
-            try:
-                if value == 0:
-                    logging.warning("setting charger priority to solar first (PCP0,0)")
-                    result = runInverterCommands(['PCP0,0'], self._invProtocol)
-                elif value == 1:
-                    logging.warning("setting charger priority to solar and utility (PCP0,1)")
-                    result = runInverterCommands(['PCP0,1'], self._invProtocol)
-                else:
-                    logging.warning("setting charger priority to only solar (PCP0,2)")
-                    result = runInverterCommands(['PCP0,2'], self._invProtocol)
-                logging.warning("PCP result: {}".format(result))
-            except Exception as e:
-                logging.error("Failed to set charger priority: {}".format(e))
-            self._queued_updates.append((path, value))
-            
-        if path == '/Settings/Output':
-            # PI18SV uses POP command for output priority
-            try:
-                if value == 0:
-                    logging.warning("setting output Solar-Utility-Battery priority (POP0)")
-                    result = runInverterCommands(['POP0'], self._invProtocol)
-                else:
-                    logging.warning("setting output Solar-Battery-Utility priority (POP1)")
-                    result = runInverterCommands(['POP1'], self._invProtocol)
-                logging.warning("POP result: {}".format(result))
-            except Exception as e:
-                logging.error("Failed to set output priority: {}".format(e))
-            self._queued_updates.append((path, value))
-        
-        return True # accept the change
 
 def main():
     parser = argparse.ArgumentParser()
