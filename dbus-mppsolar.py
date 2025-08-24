@@ -109,9 +109,17 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
                 logging.debug(f"Executing{attempt_str}: {cmd} (protocol: {protocol})")
                 # Add delay between commands
                 time.sleep(0.2)
-                # Clear any pending data
-                dev._port.reset_input_buffer()
-                dev._port.reset_output_buffer()
+                
+                # Clear any pending data by reading it
+                try:
+                    if dev._port.in_waiting:
+                        logging.debug(f"Clearing {dev._port.in_waiting} bytes from input buffer")
+                        while dev._port.in_waiting:
+                            data = dev._port.read()
+                            logging.debug(f"Cleared: {data.hex()}")
+                except Exception as e:
+                    logging.debug(f"Buffer clearing skipped: {str(e)}")
+                    
                 result = dev.run_command(command=cmd)
                 # Add delay after command
                 time.sleep(0.1)
