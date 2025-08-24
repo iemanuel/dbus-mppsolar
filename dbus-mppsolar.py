@@ -71,7 +71,7 @@ if USE_SYSTEM_MPPSOLAR:
     try:
         import mppsolar
     except:
-        USE_SYSTEM_MPPSOLAR = FALSE
+        USE_SYSTEM_MPPSOLAR = False
 if not USE_SYSTEM_MPPSOLAR:
     sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'mpp-solar'))
     import mppsolar
@@ -100,29 +100,44 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
         attempt_str = f" (attempt {attempt_num})" if attempt_num else ""
         start_time = datetime.datetime.now()
         try:
-            if USE_SYSTEM_MPPSOLAR:
+    if USE_SYSTEM_MPPSOLAR:
                 cmd_str = f"mpp-solar -b {args.baudrate} -P {protocol} -p {args.serial} -o json -c {cmd}"
                 logging.debug(f"Executing{attempt_str}: {cmd_str}")
                 result = sp.getoutput(cmd_str).split('\n')[0]
                 parsed = json.loads(result)
-            else:
-                # Try both PI18 and PI18SV protocols
-                protocols_to_try = ['PI18', 'PI18SV'] if protocol == 'PI18SV' else [protocol]
-                
-                for try_protocol in protocols_to_try:
-                    logging.debug(f"Trying protocol {try_protocol} for command {cmd}")
-                    try:
-                        # Use device's command method instead of direct serial access
-                        dev._protocol = try_protocol
-                        result = dev.run_command(command=cmd)
-                        if result and not isinstance(result, dict):
-                            logging.debug(f"Got response with {try_protocol}: {result}")
-                            parsed = mppsolar.outputs.to_json(result, False, None, None)
-                            if not 'error' in parsed:
-                                return parsed
-                    except Exception as e:
-                        logging.debug(f"Protocol {try_protocol} failed: {str(e)}")
-                        continue
+    else:
+                # Try command with current protocol
+                logging.debug(f"Executing command {cmd} with protocol {protocol}")
+                try:
+                    # Get a fresh device instance
+                    dev = mppsolar.helpers.get_device_class("mppsolar")(
+                        port=args.serial,
+                        protocol=protocol,
+                        baud=args.baudrate
+                    )
+                    
+                    # Add delay between commands
+                    time.sleep(0.2)
+                    
+                    # Execute command
+                    logging.debug(f"Sending command: {cmd}")
+                    result = dev.run_command(command=cmd)
+                    logging.debug(f"Raw result: {result}")
+                    
+                    # Parse response
+                    if result and not isinstance(result, dict):
+                        parsed = mppsolar.outputs.to_json(result, False, None, None)
+                        logging.debug(f"Parsed result: {parsed}")
+                        if not 'error' in parsed:
+    return parsed
+                    else:
+                        logging.debug(f"Invalid response type: {type(result)}")
+                        
+                except Exception as e:
+                    logging.debug(f"Command execution failed: {str(e)}")
+                    
+                # If we get here, command failed
+                logging.debug(f"Command {cmd} failed with protocol {protocol}")
                 
                 # If we get here, both protocols failed
                 logging.debug(f"All protocols failed for command {cmd}")
@@ -390,7 +405,7 @@ class DbusMppSolarService(object):
 
         # Create the management objects, as specified in the ccgx dbus-api document
         service.add_path('/Mgmt/ProcessName', __file__)
-        service.add_path('/Mgmt/ProcessVersion', 'version f{VERSION}, and running on Python ' + platform.python_version())
+        service.add_path('/Mgmt/ProcessVersion', f'version {VERSION}, and running on Python {platform.python_version()}')
         service.add_path('/Mgmt/Connection', connection)
 
         # Create the mandatory objects
@@ -744,43 +759,43 @@ class DbusMppSolarService(object):
             # Get flags (optional)
             raw = runInverterCommands(['FLAG'], self._invProtocol)
             flags = raw[0] if raw else {}
+        
+        with self._dbusmulti as m, self._dbusvebus as v:
+            # Handle inverter state
+            if 'error' in data:
+                m['/State'] = 0
+                m['/Alarms/Connection'] = 2
+                return True
             
-            with self._dbusmulti as m, self._dbusvebus as v:
-                # Handle inverter state
-                if 'error' in data:
-                    m['/State'] = 0
-                    m['/Alarms/Connection'] = 2
-                    return True
-                
-                # Map working mode to state according to PI18SV protocol
-                # 00=Power on mode
-                # 01=Standby mode
-                # 02=Bypass mode
-                # 03=Battery mode
-                # 04=Fault mode
-                # 05=Hybrid mode (Line mode, Grid mode)
-                invMode = mode.get('device_mode', '00')
-                if invMode == '03':  # Battery mode
-                    m['/State'] = 9  # Inverting
-                elif invMode == '05':  # Hybrid/Line mode
-                    if data.get('Battery Charge Current', 0) > 0:
-                        m['/State'] = 3  # Bulk charging
-                    else:    
-                        m['/State'] = 8  # Passthru
-                elif invMode == '02':  # Bypass mode
+            # Map working mode to state according to PI18SV protocol
+            # 00=Power on mode
+            # 01=Standby mode
+            # 02=Bypass mode
+            # 03=Battery mode
+            # 04=Fault mode
+            # 05=Hybrid mode (Line mode, Grid mode)
+            invMode = mode.get('device_mode', '00')
+            if invMode == '03':  # Battery mode
+                m['/State'] = 9  # Inverting
+            elif invMode == '05':  # Hybrid/Line mode
+                if data.get('Battery Charge Current', 0) > 0:
+                    m['/State'] = 3  # Bulk charging
+                else:    
                     m['/State'] = 8  # Passthru
-                elif invMode == '01':  # Standby mode
-                    m['/State'] = data.get('Battery Charge Current', 0) > 0 and 6 or 0  # Storage or Off
-                elif invMode == '04':  # Fault mode
-                    m['/State'] = 2  # Fault
-                else:
-                    m['/State'] = 0  # Off
-                v['/State'] = m['/State']
+            elif invMode == '02':  # Bypass mode
+                m['/State'] = 8  # Passthru
+            elif invMode == '01':  # Standby mode
+                m['/State'] = data.get('Battery Charge Current', 0) > 0 and 6 or 0  # Storage or Off
+            elif invMode == '04':  # Fault mode
+                m['/State'] = 2  # Fault
+            else:
+                m['/State'] = 0  # Off
+            v['/State'] = m['/State']
 
                 # Battery data
                 v['/Dc/0/Voltage'] = m['/Dc/0/Voltage'] = data.get('Battery Voltage')
                 m['/Dc/0/Current'] = -(data.get('Battery Discharge Current', 0) or 0)
-                v['/Dc/0/Current'] = -m['/Dc/0/Current']
+            v['/Dc/0/Current'] = -m['/Dc/0/Current']
                 charging_current = data.get('Battery Charge Current', 0)
 
                 # AC Output data
@@ -981,8 +996,8 @@ class DbusMppSolarService(object):
                     runInverterCommands(['PCP01', 'POP02'], self._invProtocol)  # Solar first, SBU
                 elif value == 4:  # Off
                     runInverterCommands(['PCP02'], self._invProtocol)  # Solar only
-                self._queued_updates.append((path, value))
-            
+            self._queued_updates.append((path, value))
+
             elif path == '/Ac/In/1/CurrentLimit':
                 try:
                     current = int(value)
