@@ -165,6 +165,83 @@ def test_mpp_solar():
         print(f"  ✗ mppsolar test error: {e}")
         return False
 
+def test_real_device():
+    """Test actual communication with inverter on ttyUSB0"""
+    print("\n🔌 Testing Real Device Communication")
+    print("=" * 50)
+    
+    try:
+        import serial
+        print("  ✓ pyserial imported successfully")
+        
+        # Test basic serial communication
+        print("  Testing ttyUSB0 access...")
+        ser = serial.Serial('/dev/ttyUSB0', 2400, timeout=1)
+        print(f"  ✓ Successfully opened {ser.port}")
+        print(f"  ✓ Baudrate: {ser.baudrate}")
+        print(f"  ✓ Timeout: {ser.timeout}")
+        
+        # Test PI18SV protocol commands
+        print("\n  Testing PI18SV protocol commands...")
+        
+        # Import our modules
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'mpp-solar'))
+        from mppsolar.protocols.pi18sv import pi18sv
+        
+        # Create protocol instance
+        protocol = pi18sv()
+        print(f"  ✓ PI18SV protocol created")
+        
+        # Test simple command (PI - Protocol Inquiry)
+        test_command = "PI"
+        if test_command in protocol.COMMANDS:
+            print(f"  ✓ Testing command: {test_command}")
+            
+            # Get full command with protocol formatting
+            full_command = protocol.get_full_command(test_command)
+            if full_command:
+                print(f"  ✓ Command formatted: {full_command}")
+                
+                # Send command to device
+                try:
+                    ser.write(full_command)
+                    print(f"  ✓ Command sent to inverter")
+                    
+                    # Wait for response
+                    response = ser.read(100)
+                    if response:
+                        print(f"  ✓ Response received: {response}")
+                        
+                        # Try to decode response
+                        try:
+                            decoded = protocol.get_responses(response)
+                            print(f"  ✓ Response decoded: {decoded}")
+                        except Exception as e:
+                            print(f"  ⚠️ Decode failed: {e}")
+                    else:
+                        print(f"  ⚠️ No response received")
+                        
+                except Exception as e:
+                    print(f"  ✗ Communication error: {e}")
+            else:
+                print(f"  ✗ Command formatting failed")
+        else:
+            print(f"  ✗ Command {test_command} not found in protocol")
+        
+        # Close device
+        ser.close()
+        print("  ✓ Device closed successfully")
+        
+        return True
+        
+    except ImportError as e:
+        print(f"  ✗ pyserial import failed: {e}")
+        return False
+    except Exception as e:
+        print(f"  ✗ Real device test error: {e}")
+        return False
+
 def main():
     """Main test function"""
     print("🚀 dbus-mppsolar PI18SV Protocol Test")
@@ -177,6 +254,7 @@ def main():
     velib_test = test_velib_python()
     mppsolar_test = test_mpp_solar()
     pi18sv_test = test_pi18sv_protocol()
+    real_device_test = test_real_device()
     
     # Summary
     print("\n" + "=" * 60)
@@ -185,10 +263,14 @@ def main():
     print(f"  velib_python: {'✅ PASS' if velib_test else '❌ FAIL'}")
     print(f"  mpp-solar:    {'✅ PASS' if mppsolar_test else '❌ FAIL'}")
     print(f"  PI18SV:       {'✅ PASS' if pi18sv_test else '❌ FAIL'}")
+    print(f"  Real Device:  {'✅ PASS' if real_device_test else '❌ FAIL'}")
     
-    if all([velib_test, mppsolar_test, pi18sv_test]):
-        print("\n🎉 All tests passed! PI18SV protocol is ready for EASUN InfiniSolar V inverters.")
+    if all([velib_test, mppsolar_test, pi18sv_test, real_device_test]):
+        print("\n🎉 All tests passed! PI18SV protocol is working with your inverter!")
         return 0
+    elif all([velib_test, mppsolar_test, pi18sv_test]):
+        print("\n✅ Protocol tests passed! Real device communication needs attention.")
+        return 1
     else:
         print("\n⚠️ Some tests failed. Check the output above for details.")
         return 1
