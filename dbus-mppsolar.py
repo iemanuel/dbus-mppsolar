@@ -17,6 +17,7 @@ import subprocess as sp
 import json
 from enum import Enum
 import datetime
+import time
 import dbus
 import dbus.service
 
@@ -94,8 +95,9 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
         else:
             logging.debug(f"Command '{cmd}' returned{attempt_str}: {result}")
 
-    def execute_command(dev, cmd, attempt=None):
+    def execute_command(dev, cmd, attempt_num=None):
         """Execute single command with logging."""
+        attempt_str = f" (attempt {attempt_num})" if attempt_num else ""
         start_time = datetime.datetime.now()
         try:
             if USE_SYSTEM_MPPSOLAR:
@@ -704,8 +706,12 @@ class DbusMppSolarService(object):
             # MOD - Device working mode inquiry
             # PIRI - Device rated information
             # FLAG - Query enable/disable flag status
-            raw = runInverterCommands(['GS', 'MOD', 'PIRI', 'FLAG'], self._invProtocol)
-            data, mode, warnings = raw
+            # Get status data
+            raw = runInverterCommands(['GS', 'MOD', 'FLAG'], self._invProtocol)
+            if len(raw) < 3:
+                logging.error("Incomplete response from inverter")
+                return False
+            data, mode, flags = raw  # Unpack exactly 3 values
             
             with self._dbusmulti as m, self._dbusvebus as v:
                 # Handle inverter state
