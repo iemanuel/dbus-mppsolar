@@ -38,28 +38,28 @@ class ProtocolDetector:
         
         # Comprehensive test commands based on protocol doc
         self.test_commands = [
-            # Basic identification
+            # Basic identification - try these first as they're most reliable
             'PI',    # Protocol ID
-            'ID',    # Device Serial Number
-            'VFW',   # CPU Version
-            
-            # Status commands
             'GS',    # General Status
-            'MOD',   # Working Mode
             'PIRI',  # Rated Information
-            'FWS',   # Fault/Warning Status
+            'ID',    # Device Serial Number
             
-            # Additional status
-            'T',     # Current Time
-            'ET',    # Total Generated Energy
+            # Status commands - try these next
+            'MOD',   # Working Mode
+            'FWS',   # Fault/Warning Status
             'FLAG',  # Enable/Disable Status
             
-            # Configuration queries
+            # Additional status - try these if others work
+            'T',     # Current Time
+            'ET',    # Total Generated Energy
+            'VFW',   # CPU Version
+            
+            # Configuration queries - try these last
             'DI',    # Default Parameters
             'MCHGCR',# Max Charging Current Options
             'MUCHGCR',# Max AC Charging Current Options
             
-            # Parallel system queries (if applicable)
+            # Parallel system queries - only if needed
             'PGS0',  # Parallel General Status
             'PRI0',  # Parallel Rated Info
         ]
@@ -85,9 +85,14 @@ class ProtocolDetector:
     def _send_command(self, cmd: bytes) -> Optional[bytes]:
         """Send a command and return the response."""
         try:
+            # Clear any pending data
+            self.serial.reset_input_buffer()
+            self.serial.reset_output_buffer()
+            
+            # Send command
             self.serial.write(cmd)
             self.serial.flush()
-            time.sleep(0.1)  # Give device time to respond
+            time.sleep(0.2)  # Give device more time to respond
             
             response = b''
             start_time = time.time()
@@ -150,7 +155,12 @@ class ProtocolDetector:
             'valid_crc_responses': 0,
             'any_responses': 0,
             'sample_responses': {},
-            'best_config': None
+            'best_config': {
+                'baud': None,
+                'bytesize': None,
+                'parity': None,
+                'stopbits': None
+            }
         }
 
         for baud in self.baud_rates:
@@ -165,7 +175,8 @@ class ProtocolDetector:
                 any_responses = 0
                 responses = {}
                 
-                for cmd in self.test_commands:
+                # Try most important commands first
+                for cmd in self.test_commands[:4]:  # PI, GS, PIRI, ID
                     valid_format, valid_crc, response = self._test_protocol_command(cmd)
                     
                     if response:
@@ -179,6 +190,23 @@ class ProtocolDetector:
                         valid_format_count += 1
                     if valid_crc:
                         valid_crc_count += 1
+                
+                # If we got responses to basic commands, try the rest
+                if valid_format_count > 0:
+                    for cmd in self.test_commands[4:]:
+                        valid_format, valid_crc, response = self._test_protocol_command(cmd)
+                        
+                        if response:
+                            any_responses += 1
+                            try:
+                                responses[cmd] = response.decode('ascii', errors='replace')
+                            except:
+                                responses[cmd] = str(response)
+                                
+                        if valid_format:
+                            valid_format_count += 1
+                        if valid_crc:
+                            valid_crc_count += 1
 
                 # Update results if this config is better
                 if (valid_format_count > results['valid_format_responses'] or 
@@ -214,20 +242,33 @@ def main():
     results = detector.detect()
     
     print("\n📊 Detection Results:")
-    print(f"Recommended Protocol: {results['recommended_protocol']}")
-    print(f"Best Configuration:")
-    print(f"  Baud Rate: {results['baud_rate']}")
-    print(f"  Serial Config: Bytesize={results['best_config']['bytesize']}, "
-          f"Parity={results['best_config']['parity']}, "
-          f"Stopbits={results['best_config']['stopbits']}")
+    print(f"Recommended Protocol: {results['recommended_protocol'] or 'No protocol detected'}")
+    
+    if results['best_config']['baud']:
+        print(f"\nBest Configuration:")
+        print(f"  Baud Rate: {results['baud_rate']}")
+        print(f"  Serial Config: Bytesize={results['best_config']['bytesize']}, "
+              f"Parity={results['best_config']['parity']}, "
+              f"Stopbits={results['best_config']['stopbits']}")
+    else:
+        print("\nNo working configuration found!")
+        
     print(f"\nResponse Statistics:")
     print(f"  Valid Format Responses: {results['valid_format_responses']}")
     print(f"  Valid CRC Responses: {results['valid_crc_responses']}")
     print(f"  Total Responses: {results['any_responses']}")
     
-    print("\nSample Responses:")
-    for cmd, response in results['sample_responses'].items():
-        print(f"• {cmd}: {response}")
+    if results['sample_responses']:
+        print("\nSample Responses:")
+        for cmd, response in results['sample_responses'].items():
+            print(f"• {cmd}: {response}")
+    else:
+        print("\nNo valid responses received from device!")
+        print("Possible issues:")
+        print("1. Device not connected")
+        print("2. Wrong port (/dev/ttyUSB0)")
+        print("3. Permission issues")
+        print("4. Device in use by another program")
 
 if __name__ == "__main__":
     main()
