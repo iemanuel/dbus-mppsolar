@@ -100,12 +100,12 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
         attempt_str = f" (attempt {attempt_num})" if attempt_num else ""
         start_time = datetime.datetime.now()
         try:
-    if USE_SYSTEM_MPPSOLAR:
+            if USE_SYSTEM_MPPSOLAR:
                 cmd_str = f"mpp-solar -b {args.baudrate} -P {protocol} -p {args.serial} -o json -c {cmd}"
                 logging.debug(f"Executing{attempt_str}: {cmd_str}")
                 result = sp.getoutput(cmd_str).split('\n')[0]
                 parsed = json.loads(result)
-    else:
+            else:
                 # Try command with current protocol
                 logging.debug(f"Executing command {cmd} with protocol {protocol}")
                 try:
@@ -129,7 +129,7 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
                         parsed = mppsolar.outputs.to_json(result, False, None, None)
                         logging.debug(f"Parsed result: {parsed}")
                         if not 'error' in parsed:
-    return parsed
+                            return parsed
                     else:
                         logging.debug(f"Invalid response type: {type(result)}")
                         
