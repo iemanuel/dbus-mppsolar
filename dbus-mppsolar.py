@@ -107,8 +107,16 @@ def runInverterCommands(commands, protocol="PI30", retries=2):
                 parsed = json.loads(result)
             else:
                 logging.debug(f"Executing{attempt_str}: {cmd} (protocol: {protocol})")
+                # Add delay between commands
+                time.sleep(0.2)
+                # Clear any pending data
+                dev._port.reset_input_buffer()
+                dev._port.reset_output_buffer()
                 result = dev.run_command(command=cmd)
+                # Add delay after command
+                time.sleep(0.1)
                 parsed = mppsolar.outputs.to_json(result, False, None, None)
+                logging.debug(f"Raw result: {result}")
             
             duration = (datetime.datetime.now() - start_time).total_seconds()
             logging.debug(f"Command completed in {duration:.3f}s")
@@ -706,12 +714,23 @@ class DbusMppSolarService(object):
             # MOD - Device working mode inquiry
             # PIRI - Device rated information
             # FLAG - Query enable/disable flag status
-            # Get status data
-            raw = runInverterCommands(['GS', 'MOD', 'FLAG'], self._invProtocol)
-            if len(raw) < 3:
-                logging.error("Incomplete response from inverter")
+            # Get status data - try basic commands first
+            raw = runInverterCommands(['GS'], self._invProtocol)
+            if not raw or 'error' in raw[0]:
+                logging.error("Failed to get basic status")
                 return False
-            data, mode, flags = raw  # Unpack exactly 3 values
+            data = raw[0]
+
+            # Get mode info
+            raw = runInverterCommands(['MOD'], self._invProtocol)
+            if not raw:
+                logging.error("Failed to get mode info")
+                return False
+            mode = raw[0]
+
+            # Get flags (optional)
+            raw = runInverterCommands(['FLAG'], self._invProtocol)
+            flags = raw[0] if raw else {}
             
             with self._dbusmulti as m, self._dbusvebus as v:
                 # Handle inverter state
