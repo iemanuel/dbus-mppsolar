@@ -45,13 +45,29 @@ if not USE_SYSTEM_MPPSOLAR:
 def runInverterCommands(commands, protocol="PI30"):
     global args
     global mainloop
+    parsed = []
     if USE_SYSTEM_MPPSOLAR:
-        output = [sp.getoutput("mpp-solar -b {} -P {} -p {} -o json -c {}".format(args.baudrate, protocol, args.serial, c)).split('\n')[0] for c in commands]
-        parsed = [json.loads(o) for o in output]
+        for c in commands:
+            try:
+                o = sp.getoutput("mpp-solar -b {} -P {} -p {} -o json -c {}".format(args.baudrate, protocol, args.serial, c)).split('\n')[0]
+                parsed.append(json.loads(o))
+            except Exception as e:
+                logging.warning(f"Command {c} failed via CLI: {e}")
+                parsed.append({"_command": c, "error": str(e)})
     else:
         dev = mppsolar.helpers.get_device_class("mppsolar")(port=args.serial, protocol=protocol, baud=args.baudrate)
-        results = [dev.run_command(command=c) for c in commands]
-        parsed = [mppsolar.outputs.to_json(r, False, None, None) for r in results]           
+        for c in commands:
+            try:
+                r = dev.run_command(command=c)
+                j = mppsolar.outputs.to_json(r, False, None, None)
+                # Some drivers may bubble dict errors; normalize to dict and continue
+                if isinstance(j, dict):
+                    parsed.append(j)
+                else:
+                    parsed.append({"_command": c, "raw": j})
+            except Exception as e:
+                logging.warning(f"Command {c} failed on protocol {protocol}: {e}")
+                parsed.append({"_command": c, "error": str(e)})
     return parsed
 
 def setOutputSource(source):

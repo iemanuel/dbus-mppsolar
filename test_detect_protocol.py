@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(REPO_DIR, "mpp-solar"))
 
 try:
     import serial  # pyserial
+    from serial.rs485 import RS485Settings
 except Exception as exc:
     print(f"✗ pyserial not available: {exc}")
     sys.exit(1)
@@ -40,7 +41,14 @@ SAFE_COMMANDS = [
 ]
 
 
-def try_command(ser: serial.Serial, proto_name: str, proto_obj, cmd: str, read_bytes: int) -> Tuple[bool, bool, bytes]:
+def try_command(
+    ser: serial.Serial,
+    proto_name: str,
+    proto_obj,
+    cmd: str,
+    read_bytes: int,
+    line_ending: bytes,
+) -> Tuple[bool, bool, bytes]:
     """Send one command using protocol's get_full_command, return tuple:
     (got_any_response, got_data_response, raw_bytes)
     - got_any_response: any bytes received
@@ -50,6 +58,9 @@ def try_command(ser: serial.Serial, proto_name: str, proto_obj, cmd: str, read_b
         full = proto_obj.get_full_command(cmd)
         if not full:
             return (False, False, b"")
+        # Adjust line ending if needed
+        if full.endswith(b"\r") and line_ending != b"\r":
+            full = full[:-1] + line_ending
         # Clear input buffer, write command
         ser.reset_input_buffer()
         ser.write(full)
@@ -69,19 +80,44 @@ def try_command(ser: serial.Serial, proto_name: str, proto_obj, cmd: str, read_b
         return (False, False, b"")
 
 
-def score_protocol_on_baud(port: str, baud: int, timeout: float, read_bytes: int, proto_name: str, proto_cls) -> dict:
+def score_protocol_on_baud(
+    port: str,
+    baud: int,
+    timeout: float,
+    read_bytes: int,
+    proto_name: str,
+    proto_cls,
+    bytesize: int,
+    parity: str,
+    stopbits: float,
+    rs485: bool,
+    line_ending: bytes,
+) -> dict:
     result = {
         "proto": proto_name,
         "baud": baud,
+        "bytesize": bytesize,
+        "parity": parity,
+        "stopbits": stopbits,
+        "rs485": rs485,
+        "eol": "CRLF" if line_ending == b"\r\n" else "CR",
         "any": 0,        # num commands with any response
         "data": 0,       # num commands with data-like response
         "samples": [],   # (cmd, hex/printable snippet)
     }
     try:
         with serial.Serial(port, baudrate=baud, timeout=timeout) as ser:
+            ser.bytesize = bytesize
+            ser.parity = parity
+            ser.stopbits = stopbits
+            if rs485:
+                try:
+                    ser.rs485_mode = RS485Settings(True, delay_before_tx=0.0, delay_before_rx=0.01)
+                except Exception:
+                    pass
             proto = proto_cls()
             for cmd in SAFE_COMMANDS:
-                got_any, got_data, raw = try_command(ser, proto_name, proto, cmd, read_bytes)
+                got_any, got_data, raw = try_command(ser, proto_name, proto, cmd, read_bytes, line_ending)
                 if got_any:
                     result["any"] += 1
                 if got_data:
@@ -104,10 +140,17 @@ def score_protocol_on_baud(port: str, baud: int, timeout: float, read_bytes: int
 def pick_best(results: List[dict]) -> Optional[dict]:
     if not results:
         return None
-    # Sort by: highest data responses, then any responses, then lower baud preferred (often PI18 = 2400)
+    # Sort by: highest data responses, then any responses,
+    # then prefer CR over CRLF, RS485 enabled, and lower baud
     return sorted(
         results,
-        key=lambda r: (r.get("data", 0), r.get("any", 0), -r.get("baud", 0)),
+        key=lambda r: (
+            r.get("data", 0),
+            r.get("any", 0),
+            1 if r.get("eol") == "CR" else 0,
+            1 if r.get("rs485") else 0,
+            -r.get("baud", 0),
+        ),
         reverse=True,
     )[0]
 
@@ -122,6 +165,11 @@ def main():
         default="2400,4800,9600,19200,38400,57600,115200",
         help="Comma-separated baud list to try",
     )
+    parser.add_argument("--try-parity", default="N,E", help="Comma list of parities to try (N,E) (default: N,E)")
+    parser.add_argument("--try-bytesize", default="8,7", help="Comma list of bytesizes to try (default: 8,7)")
+    parser.add_argument("--try-stopbits", default="1", help="Comma list of stopbits to try (default: 1)")
+    parser.add_argument("--try-eol", default="CR,CRLF", help="Line endings to try (CR,CRLF) (default: CR,CRLF)")
+    parser.add_argument("--try-rs485", action="store_true", help="Also try RS485 mode on")
     args = parser.parse_args()
 
     try:
@@ -139,26 +187,50 @@ def main():
 
     protos = load_protocols()
     all_results: List[dict] = []
+    # Build option spaces
+    parity_map = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN}
+    bytesize_map = {"8": serial.EIGHTBITS, "7": serial.SEVENBITS}
+    stopbits_map = {"1": serial.STOPBITS_ONE, "2": serial.STOPBITS_TWO}
+    eol_map = {"CR": b"\r", "CRLF": b"\r\n"}
+
+    try_parities = [parity_map.get(p.strip(), serial.PARITY_NONE) for p in args.try_parity.split(",")]
+    try_bytesizes = [bytesize_map.get(b.strip(), serial.EIGHTBITS) for b in args.try_bytesize.split(",")]
+    try_stopbits = [stopbits_map.get(s.strip(), serial.STOPBITS_ONE) for s in args.try_stopbits.split(",")]
+    try_eols = [eol_map.get(e.strip(), b"\r") for e in args.try_eol.split(",")]
+
     for baud in baud_list:
         for pname, pcls in protos:
-            print(f"→ Trying {pname} @ {baud}...")
-            res = score_protocol_on_baud(
-                port=args.port,
-                baud=baud,
-                timeout=args.timeout,
-                read_bytes=args.read_bytes,
-                proto_name=pname,
-                proto_cls=pcls,
-            )
-            if "error" in res:
-                print(f"  ✗ Error: {res['error']}")
-            else:
-                print(f"  ✓ Any responses:  {res['any']}")
-                print(f"  ✓ Data responses: {res['data']}")
-                for cmd, preview in res["samples"]:
-                    print(f"    - {cmd}: {preview}")
-            all_results.append(res)
-            print()
+            for bs in try_bytesizes:
+                for par in try_parities:
+                    for sb in try_stopbits:
+                        for eol in try_eols:
+                            for rs485 in ([False, True] if args.try_rs485 else [False]):
+                                label_eol = "CRLF" if eol == b"\r\n" else "CR"
+                                par_label = "E" if par == serial.PARITY_EVEN else "N"
+                                rs485_label = "ON" if rs485 else "OFF"
+                                print(f"→ {pname} @ {baud} baud, {bs}{par_label}{int(sb)} eol={label_eol} rs485={rs485_label}")
+                                res = score_protocol_on_baud(
+                                    port=args.port,
+                                    baud=baud,
+                                    timeout=args.timeout,
+                                    read_bytes=args.read_bytes,
+                                    proto_name=pname,
+                                    proto_cls=pcls,
+                                    bytesize=bs,
+                                    parity=par,
+                                    stopbits=sb,
+                                    rs485=rs485,
+                                    line_ending=eol,
+                                )
+                                if "error" in res:
+                                    print(f"  ✗ Error: {res['error']}")
+                                else:
+                                    print(f"  ✓ Any responses:  {res['any']}")
+                                    print(f"  ✓ Data responses: {res['data']}")
+                                    for cmd, preview in res["samples"]:
+                                        print(f"    - {cmd}: {preview}")
+                                all_results.append(res)
+                                print()
 
     best = pick_best(all_results)
     print("=" * 60)
@@ -168,7 +240,7 @@ def main():
         print("✗ No viable responses detected. Check wiring/port/baud and retry.")
         return 1
 
-    print(f"🏆 Recommended: Protocol={best['proto']}  Baud={best['baud']}")
+    print(f"🏆 Recommended: Protocol={best['proto']}  Baud={best['baud']}  Config={best.get('bytesize','?')}{'E' if best.get('parity')==serial.PARITY_EVEN else 'N'}{int(best.get('stopbits',1))}  RS485={'ON' if best.get('rs485') else 'OFF'}  EOL={best.get('eol')}")
     print(f"   Data responses: {best.get('data', 0)}  Any responses: {best.get('any', 0)}")
     print("   Sample responses:")
     for cmd, preview in best.get("samples", [])[:4]:
