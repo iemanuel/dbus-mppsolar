@@ -1012,40 +1012,40 @@ class DbusMppSolarService(object):
             m['/Pv/0/P'] = convert_value(data.get('PV1 Input Power'), min_val=0)
             m['/MppOperationMode'] = 2 if (m['/Pv/0/P'] or 0) > 0 else 0
 
-                # Process flags/warnings according to PI18SV protocol
-                # FLAG command returns:
-                # A: Enable/disable silence buzzer or open buzzer
-                # B: Enable/Disable overload bypass function
-                # C: Enable/Disable LCD display escape to default page after 1min timeout
-                # D: Enable/Disable overload restart
-                # E: Enable/Disable over temperature restart
-                # F: Enable/Disable backlight on
-                # G: Enable/Disable alarm on when primary source interrupt
-                # H: Enable/Disable fault code record
-                flags = warnings  # FLAG command response
-                
-                def get_flag(key, default=0):
-                    try:
-                        return int(flags.get(key, default))
-                    except:
-                        return default
+            # Process flags/warnings according to PI18SV protocol
+            # FLAG command returns:
+            # A: Enable/disable silence buzzer or open buzzer
+            # B: Enable/Disable overload bypass function
+            # C: Enable/Disable LCD display escape to default page after 1min timeout
+            # D: Enable/Disable overload restart
+            # E: Enable/Disable over temperature restart
+            # F: Enable/Disable backlight on
+            # G: Enable/Disable alarm on when primary source interrupt
+            # H: Enable/Disable fault code record
+            flags = flags  # FLAG command response
+            
+            def get_flag(key, default=0):
+                try:
+                    return int(flags.get(key, default))
+                except:
+                    return default
 
-                m['/Alarms/Connection'] = 0
-                m['/Alarms/HighTemperature'] = get_flag('E') * 2  # Over temperature restart
-                m['/Alarms/Overload'] = get_flag('D') * 2  # Overload restart
-                m['/Alarms/HighVoltage'] = get_flag('B') * 2  # Overload bypass
-                m['/Alarms/LowVoltage'] = 0  # Not directly available
-                m['/Alarms/HighVoltageAcOut'] = 0  # Not directly available
-                m['/Alarms/LowVoltageAcOut'] = 0  # Not directly available
-                m['/Alarms/HighDcVoltage'] = 0  # Not directly available
-                m['/Alarms/LowDcVoltage'] = 0  # Not directly available
-                m['/Alarms/LineFail'] = get_flag('G') * 2  # Alarm on primary source interrupt
+            m['/Alarms/Connection'] = 0
+            m['/Alarms/HighTemperature'] = get_flag('E') * 2  # Over temperature restart
+            m['/Alarms/Overload'] = get_flag('D') * 2  # Overload restart
+            m['/Alarms/HighVoltage'] = get_flag('B') * 2  # Overload bypass
+            m['/Alarms/LowVoltage'] = 0  # Not directly available
+            m['/Alarms/HighVoltageAcOut'] = 0  # Not directly available
+            m['/Alarms/LowVoltageAcOut'] = 0  # Not directly available
+            m['/Alarms/HighDcVoltage'] = 0  # Not directly available
+            m['/Alarms/LowDcVoltage'] = 0  # Not directly available
+            m['/Alarms/LineFail'] = get_flag('G') * 2  # Alarm on primary source interrupt
 
-                # Misc
-                m['/Temperature'] = data.get('inverter_heat_sink_temperature')
+            # Misc
+            m['/Temperature'] = data.get('inverter_heat_sink_temperature')
 
-                # Update internal state
-                self._updateInternal()
+            # Update internal state
+            self._updateInternal()
 
             return True
 
