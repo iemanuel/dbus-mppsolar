@@ -146,16 +146,19 @@ def runInverterCommands(commands, protocol="PI30", retries=3, retry_delay=0.5):
                     baud=args.baudrate
                 )
             
-            # Execute command with timing
-            time.sleep(0.2)  # Delay between commands
+            # Execute command with timing - some inverters need longer delays
+            time.sleep(0.3)  # Increased delay between commands (was 0.2)
             result = dev.run_command(command=cmd)
             
             if not result:
                 return {"error": "No response", "raw_response": ""}
             
-            # Check for empty response (common issue)
+            # Check for empty response (but allow it if command structure is valid)
             if isinstance(result, dict) and result.get('raw_response') == ['', '']:
-                return {"error": "Empty response from inverter", "raw_response": ""}
+                # This is actually OK - the inverter responded but has no data to report
+                # This is common in certain inverter states
+                logging.debug(f"Command '{cmd}' returned empty data (inverter may be in standby or no data available)")
+                return result  # Return the structured response even if data is empty
             
             if isinstance(result, dict):
                 return result
@@ -215,9 +218,9 @@ def runInverterCommands(commands, protocol="PI30", retries=3, retry_delay=0.5):
             log_command_result(cmd, result)
             results.append(result)
 
-            # Add delay between different commands
+            # Add delay between different commands - critical for inverter stability
             if len(commands) > 1 and cmd != commands[-1]:
-                time.sleep(0.1)  # Small delay between commands
+                time.sleep(0.25)  # Increased delay between commands (was 0.1)
 
         return results
 
@@ -312,21 +315,24 @@ class DbusMppSolarService(object):
             try:
                 # Try PI18SV protocol commands first
                 logging.info(f"Attempting PI18SV protocol detection (attempt {attempt + 1}/{max_retries})")
-                response = runInverterCommands(['PI', 'ID', 'VFW'], "PI18SV")
+                # Try a mix of identification and status commands
+                response = runInverterCommands(['PI', 'GS', 'PIRI'], "PI18SV")
                 
                 if response and not any('error' in r for r in response):
-                    # Check for empty responses that indicate communication issues
-                    valid_responses = []
+                    # Protocol is working if we get structured responses, even if data is empty
+                    # This is common with some inverters that respond but don't populate data
+                    successful_commands = 0
                     for r in response:
-                        if isinstance(r, dict) and r.get('raw_response') not in [['', ''], '', None]:
-                            valid_responses.append(r)
+                        if isinstance(r, dict) and '_command' in r:
+                            successful_commands += 1
                     
-                    if valid_responses:
-                        logging.info("PI18SV protocol confirmed")
+                    if successful_commands >= 2:  # At least 2 commands succeeded
+                        logging.info("PI18SV protocol confirmed (commands successful, may have empty data)")
                         self._invData = response
+                        self._invProtocol = 'PI18SV'
                         return True
                     else:
-                        logging.warning("PI18SV commands succeeded but returned empty data")
+                        logging.warning("PI18SV partial success, continuing detection")
                         continue
 
                 # If that fails, try QPI command
@@ -348,6 +354,9 @@ class DbusMppSolarService(object):
                     delay = base_delay * (2 ** attempt)
                     logging.info(f"Protocol detection failed, retrying in {delay:.1f}s")
                     time.sleep(delay)
+                    
+                    # Additional stabilization delay for serial communication
+                    time.sleep(0.2)
                     
             except Exception as e:
                 logging.warning(f"Protocol detection attempt {attempt + 1} failed: {str(e)}")
