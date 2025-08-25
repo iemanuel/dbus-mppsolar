@@ -390,13 +390,13 @@ class DbusMppSolarService(object):
         self._dcLast = 0
         self._chargeLast = 0
         
-        # Create the services
-        self._dbusmulti = VeDbusService(f'com.victronenergy.multi.mppsolar.{tty}', dbusconnection(), register=False)
-        self._dbusvebus = VeDbusService(f'com.victronenergy.acsystem.mppsolar.{tty}', dbusconnection(), register=False)
+        # Create the services - use standard Venus OS naming convention
+        self._dbusmulti = VeDbusService(f'com.victronenergy.multi.{tty}', dbusconnection(), register=False)
+        self._dbusvebus = VeDbusService(f'com.victronenergy.acsystem.{tty}', dbusconnection(), register=False)
 
-        # Set up default paths
-        self.setupDefaultPaths(self._dbusmulti, connection, deviceinstance, f"Inverter {productname}")
-        self.setupDefaultPaths(self._dbusvebus, connection, deviceinstance, f"Vebus {productname}")
+        # Set up default paths with proper product identification
+        self.setupDefaultPaths(self._dbusmulti, connection, deviceinstance, "MPP Solar Inverter")
+        self.setupDefaultPaths(self._dbusvebus, connection, deviceinstance, "MPP Solar AC System")
 
         # Create paths for 'multi'
         self._dbusmulti.add_path('/Ac/In/1/L1/V', 0)
@@ -511,6 +511,9 @@ class DbusMppSolarService(object):
         service.add_path('/Mgmt/ProcessName', __file__)
         service.add_path('/Mgmt/ProcessVersion', f'version {VERSION}, and running on Python {platform.python_version()}')
         service.add_path('/Mgmt/Connection', connection)
+        
+        # Add device type identification for Venus OS
+        service.add_path('/DeviceType', 1)  # 1 = Multi/Quattro, 2 = Inverter, 3 = Charger
 
         # Create the mandatory objects
         service.add_path('/DeviceInstance', deviceinstance)
