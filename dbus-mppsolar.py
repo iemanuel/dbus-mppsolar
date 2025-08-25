@@ -51,6 +51,8 @@ def setup_logging(log_level=logging.INFO, log_file='/var/log/dbus-mppsolar.log',
         
         # Configure root logger
         root_logger = logging.getLogger()
+        # Clear any existing handlers to prevent duplicates
+        root_logger.handlers.clear()
         root_logger.setLevel(log_level)
         root_logger.addHandler(file_handler)
         root_logger.addHandler(console_handler)
@@ -64,8 +66,6 @@ def setup_logging(log_level=logging.INFO, log_file='/var/log/dbus-mppsolar.log',
             format=console_format
         )
         logging.warning("Failed to set up file logging: %s", str(e))
-
-setup_logging()
 
 # our own packages
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), 'velib_python'))
