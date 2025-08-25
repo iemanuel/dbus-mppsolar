@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# dbus-mppsolar Deployment Script for VenusOS
-# This script automates the installation process from GitHub
+# dbus-mppsolar Complete Deployment Script for VenusOS
+# This script automates the complete installation and startup process from GitHub
 
 set -e  # Exit on any error
 
@@ -448,15 +448,19 @@ except ImportError as e:
     fi
 }
 
-# Restart services
-restart_services() {
-    log "Restarting services to pick up changes..."
+# Restart services and start mppsolar
+restart_and_start_services() {
+    log "Restarting services and starting mppsolar..."
     
     # Restart serial-starter to pick up new configuration
     if [[ -d "/service/serial-starter" ]]; then
         log "Restarting serial-starter..."
         svc -r /service/serial-starter
         log "✓ Serial-starter restarted"
+        
+        # Wait for serial-starter to fully restart
+        log "Waiting for serial-starter to fully restart..."
+        sleep 5
     else
         warn "Serial-starter service not found - may need manual restart"
     fi
@@ -470,41 +474,168 @@ restart_services() {
         fi
     done
     
-    log "✓ Services restarted and cleaned up"
+    # Check for available TTY devices
+    log "Checking for available TTY devices..."
+    TTY_DEVICES=()
+    for device in /dev/ttyUSB* /dev/ttyACM*; do
+        if [[ -e "$device" ]]; then
+            TTY_DEVICES+=("$device")
+            log "Found TTY device: $device"
+        fi
+    done
+    
+    if [[ ${#TTY_DEVICES[@]} -eq 0 ]]; then
+        warn "No TTY devices found. Please connect your MPP Solar inverter via USB."
+        log "The service will start automatically when a TTY device is connected."
+    else
+        log "Found ${#TTY_DEVICES[@]} TTY device(s). Starting mppsolar service..."
+        
+        # Start mppsolar service for each TTY device
+        for device in "${TTY_DEVICES[@]}"; do
+            DEVICE_NAME=$(basename "$device")
+            log "Starting mppsolar service for $DEVICE_NAME..."
+            
+            # Create service directory
+            SERVICE_DIR="/service/dbus-mppsolar.$DEVICE_NAME"
+            mkdir -p "$SERVICE_DIR"
+            
+            # Create service run script
+            cat > "$SERVICE_DIR/run" << EOF
+#!/bin/sh
+echo "*** starting mppsolar service for $DEVICE_NAME ***"
+exec 2>&1
+exec /data/etc/dbus-mppsolar/start-dbus-mppsolar.sh $DEVICE_NAME
+EOF
+            
+            # Create service log script
+            mkdir -p "$SERVICE_DIR/log"
+            cat > "$SERVICE_DIR/log/run" << EOF
+#!/bin/sh
+exec 2>&1
+exec multilog t s25000 n4 /var/log/mppsolar.$DEVICE_NAME
+EOF
+            
+            # Make scripts executable
+            chmod +x "$SERVICE_DIR/run"
+            chmod +x "$SERVICE_DIR/log/run"
+            
+            # Start the service
+            svc -u "$SERVICE_DIR"
+            log "✓ Started mppsolar service for $DEVICE_NAME"
+            
+            # Wait a moment for service to start
+            sleep 2
+            
+            # Check service status
+            if svstat "$SERVICE_DIR" | grep -q "up"; then
+                log "✓ Service for $DEVICE_NAME is running"
+            else
+                warn "Service for $DEVICE_NAME failed to start - check logs"
+            fi
+        done
+    fi
+    
+    log "✓ Services restarted and mppsolar started"
+}
+
+# Test service functionality
+test_service_functionality() {
+    log "Testing service functionality..."
+    
+    # Check if any mppsolar services are running
+    RUNNING_SERVICES=()
+    for service in /service/dbus-mppsolar.*; do
+        if [[ -d "$service" ]]; then
+            if svstat "$service" | grep -q "up"; then
+                RUNNING_SERVICES+=("$service")
+                log "✓ Service $service is running"
+            else
+                warn "Service $service is not running"
+            fi
+        fi
+    done
+    
+    if [[ ${#RUNNING_SERVICES[@]} -eq 0 ]]; then
+        warn "No mppsolar services are currently running"
+        return 1
+    fi
+    
+    # Test DBus service availability
+    log "Testing DBus service availability..."
+    if command -v dbus-send &> /dev/null; then
+        # Wait a bit for services to fully initialize
+        sleep 3
+        
+        # Check for mppsolar DBus services
+        DBUS_SERVICES=$(dbus-send --system --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null | grep -i mppsolar || echo "")
+        
+        if [[ -n "$DBUS_SERVICES" ]]; then
+            log "✓ DBus services found: $DBUS_SERVICES"
+        else
+            log "DBus services not yet available (may take a few minutes to initialize)"
+        fi
+    else
+        warn "dbus-send not available - cannot test DBus services"
+    fi
+    
+    log "Service functionality test completed"
 }
 
 # Display post-installation information
 show_post_install_info() {
     echo
     echo -e "${BLUE}========================================${NC}"
-    echo -e "${BLUE}  Installation Completed Successfully!${NC}"
+    echo -e "${BLUE}  Installation & Startup Completed!${NC}"
     echo -e "${BLUE}========================================${NC}"
     echo
-    echo -e "${GREEN}What was installed:${NC}"
+    echo -e "${GREEN}What was installed and started:${NC}"
     echo "• Main script: $INSTALL_DIR/dbus-mppsolar.py"
     echo "• Service template: $SERVICE_TEMPLATE_DIR/"
     echo "• Serial starter config: /opt/victronenergy/serial-starter/mppsolar.conf"
     echo "• Python modules: velib_python and mpp-solar (included)"
+    echo "• Active services: $(ls -d /service/dbus-mppsolar.* 2>/dev/null | wc -l) mppsolar service(s)"
     echo
-    echo -e "${GREEN}Next steps:${NC}"
-    echo "1. Connect your MPP Solar inverter via USB-Serial"
-    echo "2. The service should start automatically (check logs below)"
-    echo "3. Venus OS should detect the inverter as a Multi/Quattro device"
+    echo -e "${GREEN}Current Status:${NC}"
+    
+    # Show running services
+    RUNNING_COUNT=0
+    for service in /service/dbus-mppsolar.*; do
+        if [[ -d "$service" ]]; then
+            if svstat "$service" | grep -q "up"; then
+                echo "• $(basename "$service"): ✅ RUNNING"
+                ((RUNNING_COUNT++))
+            else
+                echo "• $(basename "$service"): ❌ STOPPED"
+            fi
+        fi
+    done
+    
+    if [[ $RUNNING_COUNT -eq 0 ]]; then
+        echo "• No services currently running"
+    fi
+    
     echo
     echo -e "${GREEN}Monitoring:${NC}"
-    echo "• Service logs: tail -f /var/log/mppsolar.TTY/current"
+    echo "• Service logs: tail -f /var/log/mppsolar.*/current"
     echo "• Serial starter logs: tail -f /var/log/serial-starter/current"
     echo "• Check for mppsolar detection: grep -i mppsolar /var/log/serial-starter/current"
     echo
-    echo -e "${GREEN}Troubleshooting:${NC}"
-    echo "• Check service status: svstat /service/dbus-mppsolar.ttyUSB0"
-    echo "• Manual test: python3 $INSTALL_DIR/dbus-mppsolar.py --serial /dev/ttyUSB0 --log-level DEBUG"
-    echo "• Restart serial-starter: svc -r /service/serial-starter"
-    echo
     echo -e "${GREEN}Venus OS Integration:${NC}"
-    echo "• The inverter should appear in the Venus OS dashboard"
+    echo "• The inverter should appear in the Venus OS dashboard within a few minutes"
     echo "• DBus service will be available at com.victronenergy.multi.ttyUSB0"
     echo "• Real-time inverter data will be accessible through DBus"
+    echo
+    echo -e "${GREEN}Troubleshooting:${NC}"
+    echo "• Check service status: svstat /service/dbus-mppsolar.*"
+    echo "• Manual test: python3 $INSTALL_DIR/dbus-mppsolar.py --serial /dev/ttyUSB0 --log-level DEBUG"
+    echo "• Restart serial-starter: svc -r /service/serial-starter"
+    echo "• Check TTY devices: ls -la /dev/ttyUSB*"
+    echo
+    echo -e "${GREEN}Next Steps:${NC}"
+    echo "1. Check the Venus OS interface for inverter recognition"
+    echo "2. Monitor the service logs for any errors"
+    echo "3. Verify DBus service is accessible"
+    echo "4. Test inverter communication and data retrieval"
     echo
     echo -e "${GREEN}Backup location:${NC}"
     echo "• Previous installation backed up to: $BACKUP_DIR"
@@ -514,13 +645,14 @@ show_post_install_info() {
 # Main installation function
 main() {
     echo -e "${BLUE}========================================${NC}"
-    echo -e "${BLUE}  dbus-mppsolar Deployment Script${NC}"
+    echo -e "${BLUE}  dbus-mppsolar Complete Deployment Script${NC}"
     echo -e "${BLUE}========================================${NC}"
     echo
     
-    # Run essential checks only
+    # Run essential checks
     check_root
     check_venusos
+    check_requirements
     
     # Core installation steps
     clean_installation
@@ -529,14 +661,14 @@ main() {
     configure_serial_starter
     set_permissions
     
-    # Optional steps (won't fail installation)
-    check_dependencies || warn "Dependency check failed - check manually"
-    
-    # Test what we can
+    # Test installation
     test_installation || warn "Installation test failed - check manually"
     
-    # Restart services
-    restart_services
+    # Restart services and start mppsolar
+    restart_and_start_services
+    
+    # Test service functionality
+    test_service_functionality || warn "Service functionality test failed - check manually"
     
     # Show completion info
     show_post_install_info
