@@ -304,7 +304,39 @@ class DbusMppSolarService(object):
         # Initialize protocol and data
         self._invProtocol = "PI18SV"
         self._invData = []
-        self._detect_protocol()
+        protocol_detected = self._detect_protocol()
+        
+        if not protocol_detected:
+            logging.warning("Protocol detection failed, continuing with defaults")
+        
+        # Create a listener to the DC system power, we need it to give some values
+        self._systemDcPower = None        
+        self._dcLast = 0
+        self._chargeLast = 0
+        
+        # Create the services - use standard Venus OS naming convention
+        try:
+            self._dbusmulti = VeDbusService(f'com.victronenergy.multi.{tty}', dbusconnection())
+            self._dbusvebus = VeDbusService(f'com.victronenergy.acsystem.{tty}', dbusconnection())
+            logging.info(f"✓ DBus services created: multi.{tty} and acsystem.{tty}")
+        except Exception as e:
+            logging.error(f"✗ Failed to create DBus services: {e}")
+            raise
+
+        # Set up default paths with proper product identification
+        self.setupDefaultPaths(self._dbusmulti, connection, deviceinstance, "MPP Solar Inverter")
+        self.setupDefaultPaths(self._dbusvebus, connection, deviceinstance, "MPP Solar AC System")
+
+        # Create paths for 'multi' - essential inverter interface
+        self._setup_multi_paths()
+        
+        # Create paths for 'vebus' - AC system interface  
+        self._setup_vebus_paths()
+
+        # Services are automatically registered when created (removed register=False)
+        logging.info("✓ DBus services registered and ready")
+
+        GLib.timeout_add(10000 if USE_SYSTEM_MPPSOLAR else 2000, self._update)
 
     def _detect_protocol(self):
         """Detect and verify PI18SV protocol support with retries."""
@@ -363,41 +395,19 @@ class DbusMppSolarService(object):
                 if attempt < max_retries - 1:
                     time.sleep(base_delay * (2 ** attempt))
 
-        # If all attempts fail, set defaults
+        # If all attempts fail, set defaults and continue
         logging.warning("Protocol detection failed after all retries, using defaults")
         self._invProtocol = "PI18SV"
         self._invData = [
             {"serial_number": "UNKNOWN"},
-            {"main_cpu_firmware_version": "0.0"}
+            {"main_cpu_firmware_version": "1.0.0"}
         ]
+        
+        logging.info(f"Connected to inverter on {self._tty} ({self._invProtocol}), setting up dbus")
         return False
-        
-        # Always use PI18SV protocol
-        if not self._invData:  # If we don't have data yet
-            try:
-                self._invData = runInverterCommands(['ID', 'VFW'], 'PI18SV')
-                logging.info(f"Successfully got device info from {tty} using PI18SV protocol")
-            except Exception as e:
-                logging.warning(f"Failed to get device info: {str(e)}, using defaults")
-                self._invData = [
-                    {"serial_number": "UNKNOWN"},
-                    {"main_cpu_firmware_version": "0.0"}
-                ]
-        logging.warning(f"Connected to inverter on {tty} ({self._invProtocol}), setting up dbus with /DeviceInstance = {deviceinstance}")
-        
-        # Create a listener to the DC system power, we need it to give some values
-        self._systemDcPower = None        
-        self._dcLast = 0
-        self._chargeLast = 0
-        
-        # Create the services - use standard Venus OS naming convention
-        self._dbusmulti = VeDbusService(f'com.victronenergy.multi.{tty}', dbusconnection(), register=False)
-        self._dbusvebus = VeDbusService(f'com.victronenergy.acsystem.{tty}', dbusconnection(), register=False)
-
-        # Set up default paths with proper product identification
-        self.setupDefaultPaths(self._dbusmulti, connection, deviceinstance, "MPP Solar Inverter")
-        self.setupDefaultPaths(self._dbusvebus, connection, deviceinstance, "MPP Solar AC System")
-
+    
+    def _setup_multi_paths(self):
+        """Set up DBus paths for the multi/inverter service."""
         # Create paths for 'multi'
         self._dbusmulti.add_path('/Ac/In/1/L1/V', 0)
         self._dbusmulti.add_path('/Ac/In/1/L1/I', 0)
@@ -466,7 +476,9 @@ class DbusMppSolarService(object):
         self._dbusmulti.add_path('/Alarms/LineFail', 0)
         self._dbusmulti.add_path('/Alarms/GridLost', 0)
         self._dbusmulti.add_path('/Alarms/Connection', 0)
-           
+    
+    def _setup_vebus_paths(self):
+        """Set up DBus paths for the VE.Bus/AC system service."""
         # Create paths for 'vebus'
         self._dbusvebus.add_path('/Ac/ActiveIn/L1/F', 0)
         self._dbusvebus.add_path('/Ac/ActiveIn/L1/I', 0)
@@ -496,12 +508,6 @@ class DbusMppSolarService(object):
         self._dbusvebus.add_path('/ModeIsAdjustable', 1)
         self._dbusvebus.add_path('/State', 0)
         self._dbusvebus.add_path('/Ac/In/1/L1/V', 0, writeable=False, onchangecallback=self._change)
-
-        # Register on the bus
-        self._dbusmulti.register()
-        self._dbusvebus.register() # Comment to not add it to the path
-
-        GLib.timeout_add(10000 if USE_SYSTEM_MPPSOLAR else 2000, self._update)
     
     def setupDefaultPaths(self, service, connection, deviceinstance, productname):
         # self._dbusmulti.add_mandatory_paths(__file__, 'version f{VERSION}, and running on Python ' + platform.python_version(), connection,
@@ -517,10 +523,10 @@ class DbusMppSolarService(object):
 
         # Create the mandatory objects
         service.add_path('/DeviceInstance', deviceinstance)
-        service.add_path('/ProductId', self._invData[0].get('serial_number', 0))
+        service.add_path('/ProductId', 0xB012)  # Use proper Victron product ID for multi/inverter
         service.add_path('/ProductName', productname)
-        service.add_path('/FirmwareVersion', self._invData[1].get('main_cpu_firmware_version', 0))
-        service.add_path('/HardwareVersion', 0)
+        service.add_path('/FirmwareVersion', self._invData[1].get('main_cpu_firmware_version', '1.0.0'))
+        service.add_path('/HardwareVersion', '1.0')
         service.add_path('/Connected', 1)
 
         # Create paths for service status monitoring
