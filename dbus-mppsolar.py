@@ -301,8 +301,8 @@ class DbusMppSolarService(object):
         self._last_update = 0  # Last successful update timestamp
         self._update_interval = 2  # Update interval in seconds
 
-        # Initialize protocol and data - InfiniSolar V uses PI18
-        self._invProtocol = "PI18"
+        # Initialize protocol and data - InfiniSolar V uses PI18SV
+        self._invProtocol = "PI18SV"
         self._invData = []
         protocol_detected = self._detect_protocol()
         
@@ -345,10 +345,10 @@ class DbusMppSolarService(object):
 
         for attempt in range(max_retries):
             try:
-                # Try PI18 protocol commands first (for InfiniSolar V)
-                logging.info(f"Attempting PI18 protocol detection (attempt {attempt + 1}/{max_retries})")
+                # Try PI18SV protocol commands first (for InfiniSolar V)
+                logging.info(f"Attempting PI18SV protocol detection (attempt {attempt + 1}/{max_retries})")
                 # Try a mix of identification and status commands
-                response = runInverterCommands(['PIRI'], "PI18")
+                response = runInverterCommands(['GS', 'PIRI'], "PI18SV")
                 
                 if response and not any('error' in r for r in response):
                     # Protocol is working if we get structured responses, even if data is empty
@@ -359,22 +359,22 @@ class DbusMppSolarService(object):
                             successful_commands += 1
                     
                     if successful_commands >= 1:  # At least 1 command succeeded
-                        logging.info("PI18 protocol confirmed (commands successful)")
+                        logging.info("PI18SV protocol confirmed (commands successful)")
                         self._invData = response
-                        self._invProtocol = 'PI18'
+                        self._invProtocol = 'PI18SV'
                         return True
                     else:
-                        logging.warning("PI18 partial success, continuing detection")
+                        logging.warning("PI18SV partial success, continuing detection")
                         continue
 
-                # For PI18, skip the QPI test as it's not available in this protocol
-                logging.debug("PI18 direct test failed, trying fallback data")
-                # Set minimal data for PI18
+                # For PI18SV, try fallback data
+                logging.debug("PI18SV direct test failed, trying fallback data")
+                # Set minimal data for PI18SV
                 self._invData = [
-                    {"serial_number": "INFINISOLAR_V"},
+                    {"serial_number": "INFINISOLAR_V_5600W"},
                     {"main_cpu_firmware_version": "1.0.0"}
                 ]
-                self._invProtocol = 'PI18'
+                self._invProtocol = 'PI18SV'
 
                 # Wait before retry with exponential backoff
                 if attempt < max_retries - 1:
@@ -392,7 +392,7 @@ class DbusMppSolarService(object):
 
         # If all attempts fail, set defaults and continue
         logging.warning("Protocol detection failed after all retries, using defaults")
-        self._invProtocol = "PI18"
+        self._invProtocol = "PI18SV"
         self._invData = [
             {"serial_number": "UNKNOWN"},
             {"main_cpu_firmware_version": "1.0.0"}
@@ -585,9 +585,9 @@ class DbusMppSolarService(object):
             elif self._invProtocol == 'PI18SV':
                 success = self._update_PI18SV()
             else:
-                logging.warning(f"Unknown protocol {self._invProtocol}, defaulting to PI18")
-                self._invProtocol = 'PI18'
-                success = self._update_PI18()
+                logging.warning(f"Unknown protocol {self._invProtocol}, defaulting to PI18SV")
+                self._invProtocol = 'PI18SV'
+                success = self._update_PI18SV()
             
             # Update status based on result
             with self._dbusmulti as m:
@@ -630,9 +630,9 @@ class DbusMppSolarService(object):
             elif self._invProtocol == 'PI18SV':
                 return self._change_PI18SV(path, value)
             else:
-                logging.warning(f"Unknown protocol {self._invProtocol}, defaulting to PI18")
-                self._invProtocol = 'PI18'
-                return self._change_PI18(path, value)
+                logging.warning(f"Unknown protocol {self._invProtocol}, defaulting to PI18SV")
+                self._invProtocol = 'PI18SV'
+                return self._change_PI18SV(path, value)
         except:
             logging.exception('Error in change loop', exc_info=True)
             mainloop.quit()
