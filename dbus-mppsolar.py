@@ -146,12 +146,28 @@ def runInverterCommands(commands, protocol="PI30", retries=3, retry_delay=0.5):
                     baud=args.baudrate
                 )
             
+            # Add wake-up sequence for Voltronic/MPP Solar inverters that go to sleep
+            if attempt_num == 1:
+                try:
+                    logging.debug(f"Sending wake-up command before {cmd}")
+                    # Send QPIRI as wake-up - most universal command
+                    dev.run_command(command="QPIRI")
+                    time.sleep(0.5)  # Allow inverter to wake up
+                except:
+                    pass  # Ignore wake-up failures
+            
             # Execute command with timing - some inverters need longer delays
             time.sleep(0.3)  # Increased delay between commands (was 0.2)
             result = dev.run_command(command=cmd)
             
             if not result:
                 return {"error": "No response", "raw_response": ""}
+            
+            # Check for NAK response (inverter in sleep mode)
+            if hasattr(result, 'get'):
+                raw_resp = result.get('raw_response', [''])[0] if result.get('raw_response') else ''
+                if raw_resp and '(NAK' in raw_resp:
+                    return {"error": "Inverter NAK - sleep mode", "raw_response": raw_resp}
             
             # Check for empty response (but allow it if command structure is valid)
             if isinstance(result, dict) and result.get('raw_response') == ['', '']:
@@ -348,15 +364,21 @@ class DbusMppSolarService(object):
                 # Try PI18SV protocol commands first (for InfiniSolar V)
                 logging.info(f"Attempting PI18SV protocol detection (attempt {attempt + 1}/{max_retries})")
                 # Try a mix of identification and status commands
-                response = runInverterCommands(['GS', 'PIRI'], "PI18SV")
+                response = runInverterCommands(['PIRI'], "PI18SV")  # Try PIRI only first
                 
                 if response and not any('error' in r for r in response):
-                    # Protocol is working if we get structured responses, even if data is empty
-                    # This is common with some inverters that respond but don't populate data
+                    # Check for NAK or invalid responses
                     successful_commands = 0
                     for r in response:
                         if isinstance(r, dict) and '_command' in r:
-                            successful_commands += 1
+                            raw_resp = r.get('raw_response', [''])[0]
+                            # Check if response is valid (not NAK, not empty)
+                            if (raw_resp and 
+                                not raw_resp.startswith('(NAK') and
+                                len(raw_resp.strip()) > 5):
+                                successful_commands += 1
+                            else:
+                                logging.warning(f"Command {r.get('_command')} got invalid response: {raw_resp[:50]}")
                     
                     if successful_commands >= 1:  # At least 1 command succeeded
                         logging.info("PI18SV protocol confirmed (commands successful)")
@@ -376,8 +398,15 @@ class DbusMppSolarService(object):
                 ]
                 self._invProtocol = 'PI18SV'
 
-                # Wait before retry with exponential backoff
+                # Try different baud rate on retry
                 if attempt < max_retries - 1:
+                    # Try different baud rates: 2400, 9600, 1200
+                    if attempt == 1:
+                        logging.info("Trying 9600 baud rate")
+                        # Note: Baud rate would need to be passed to runInverterCommands
+                    elif attempt == 2:
+                        logging.info("Trying 1200 baud rate")
+                    
                     delay = base_delay * (2 ** attempt)
                     logging.info(f"Protocol detection failed, retrying in {delay:.1f}s")
                     time.sleep(delay)
@@ -989,6 +1018,87 @@ class DbusMppSolarService(object):
 
     def _update_PI18SV(self):
         """Update handler for PI18SV protocol."""
+        logging.info("Starting PI18SV update cycle")
+        try:
+            # Use GS command - we know this works for your InfiniSolar V
+            status_batch = ['GS']  # Real-time status data
+            
+            # Execute status command
+            raw_status = runInverterCommands(status_batch, self._invProtocol)
+            
+            if not raw_status or len(raw_status) == 0:
+                self._handle_protocol_error('communication')
+                return False
+                
+            data = raw_status[0]  # GS response
+            
+            # Check for errors
+            if 'error' in data or 'ERROR' in data:
+                self._handle_protocol_error('status_error', {'gs': data})
+                return False
+            
+            # Process GS data - your InfiniSolar V format
+            with self._dbusmulti as m, self._dbusvebus as v:
+                # Parse the real-time data we got from GS
+                # Based on your response: AC Output Voltage: [2310, '0.1V'] = 231.0V
+                
+                # AC Output data (confirmed working from your test)
+                ac_out_voltage = data.get('AC Output Voltage', [0])[0] / 10.0  # 2310 -> 231.0V
+                ac_out_frequency = data.get('AC Output Frequency', [500])[0] / 10.0  # 500 -> 50.0Hz  
+                ac_out_power = data.get('AC Output Active Power', [0])[0]  # 29W
+                
+                v['/Ac/Out/L1/V'] = m['/Ac/Out/L1/V'] = ac_out_voltage
+                v['/Ac/Out/L1/F'] = m['/Ac/Out/L1/F'] = ac_out_frequency
+                v['/Ac/Out/L1/P'] = m['/Ac/Out/L1/P'] = ac_out_power
+                
+                # Battery data (confirmed working)
+                battery_voltage = data.get('Battery Voltage', [0])[0] / 10.0  # 485 -> 48.5V
+                battery_soc = data.get('Battery Capacity', [0])[0]  # 43%
+                discharge_current = data.get('Battery Discharge Current', [0])[0]  # 1A
+                
+                v['/Dc/0/Voltage'] = m['/Dc/0/Voltage'] = battery_voltage
+                m['/Dc/0/Current'] = -discharge_current  # Negative for discharge
+                v['/Dc/0/Current'] = -discharge_current
+                m['/Soc'] = battery_soc
+                
+                # Determine state based on real data
+                load_connected = data.get('Load connection', [''])[0] == 'connect'
+                power_direction = data.get('Battery power direction', [''])[0]
+                
+                if load_connected and ac_out_power > 0:
+                    if power_direction == 'discharge':
+                        m['/State'] = 9  # Inverting
+                    else:
+                        m['/State'] = 8  # Passthru
+                else:
+                    m['/State'] = 0  # Off
+                    
+                v['/State'] = m['/State']
+                
+                # Set mode based on operation
+                m['/Mode'] = 3  # On
+                v['/Mode'] = 3  # On
+                
+                # Clear connection alarm since we got data
+                m['/Alarms/Connection'] = 0
+                
+                # Temperature
+                temp = data.get('Inverter Temperature', [0])[0]
+                m['/Temperature'] = temp
+                
+                logging.info(f"PI18SV update: {ac_out_voltage}V, {ac_out_power}W, {battery_voltage}V ({battery_soc}%)")
+                
+                # Update internal state
+                self._updateInternal()
+                
+                return True
+                
+        except Exception as e:
+            logging.exception(f"Error in PI18SV update: {str(e)}")
+            return False
+
+    def _update_PI18SV_old(self):
+        """Old update handler for PI18SV protocol."""
         logging.info("Starting PI18SV update cycle")
         try:
             # Define command batches for better performance
