@@ -85,7 +85,7 @@ if not USE_SYSTEM_MPPSOLAR:
     import mppsolar
 
 # Inverter commands to read from the serial
-def runInverterCommands(commands, protocol="PI30", retries=2, retry_delay=0.5):
+def runInverterCommands(commands, protocol="PI30", retries=3, retry_delay=0.5):
     """Run commands with error handling, retries and detailed logging.
     
     Args:
@@ -152,6 +152,10 @@ def runInverterCommands(commands, protocol="PI30", retries=2, retry_delay=0.5):
             
             if not result:
                 return {"error": "No response", "raw_response": ""}
+            
+            # Check for empty response (common issue)
+            if isinstance(result, dict) and result.get('raw_response') == ['', '']:
+                return {"error": "Empty response from inverter", "raw_response": ""}
             
             if isinstance(result, dict):
                 return result
@@ -311,9 +315,19 @@ class DbusMppSolarService(object):
                 response = runInverterCommands(['PI', 'ID', 'VFW'], "PI18SV")
                 
                 if response and not any('error' in r for r in response):
-                    logging.info("PI18SV protocol confirmed")
-                    self._invData = response
-                    return True
+                    # Check for empty responses that indicate communication issues
+                    valid_responses = []
+                    for r in response:
+                        if isinstance(r, dict) and r.get('raw_response') not in [['', ''], '', None]:
+                            valid_responses.append(r)
+                    
+                    if valid_responses:
+                        logging.info("PI18SV protocol confirmed")
+                        self._invData = response
+                        return True
+                    else:
+                        logging.warning("PI18SV commands succeeded but returned empty data")
+                        continue
 
                 # If that fails, try QPI command
                 logging.debug("PI18SV direct test failed, trying QPI")
