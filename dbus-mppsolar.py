@@ -150,8 +150,8 @@ def runInverterCommands(commands, protocol="PI30", retries=3, retry_delay=0.5):
             if attempt_num == 1:
                 try:
                     logging.debug(f"Sending wake-up command before {cmd}")
-                    # Send QPIRI as wake-up - most universal command
-                    dev.run_command(command="QPIRI")
+                    # Send PIRI as wake-up - ^P format for InfiniSolar V
+                    dev.run_command(command="PIRI")
                     time.sleep(0.5)  # Allow inverter to wake up
                 except:
                     pass  # Ignore wake-up failures
