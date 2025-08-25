@@ -8,8 +8,8 @@ set -e  # Exit on any error
 # Configuration
 REPO_URL="https://github.com/iemanuel/dbus-mppsolar"
 INSTALL_DIR="/data/etc/dbus-mppsolar"
-SERVICE_TEMPLATE_DIR="/opt/victronenergy/service-templates/dbus-mppsolar"
-SERIAL_STARTER_CONF="/etc/venus/serial-starter.conf"
+SERVICE_TEMPLATE_DIR="/opt/victronenergy/service-templates/mppsolar"
+SERIAL_STARTER_CONF="/opt/victronenergy/serial-starter/mppsolar.conf"
 BACKUP_DIR="/data/etc/dbus-mppsolar.backup.$(date +%Y%m%d_%H%M%S)"
 
 # Colors for output
@@ -104,11 +104,11 @@ clean_installation() {
         log "✓ Existing installation removed"
     fi
     
-    # Remove any existing service files
+    # Remove any existing service template files
     if [[ -d "$SERVICE_TEMPLATE_DIR" ]]; then
-        log "Removing existing service files: $SERVICE_TEMPLATE_DIR"
+        log "Removing existing service template files: $SERVICE_TEMPLATE_DIR"
         rm -rf "$SERVICE_TEMPLATE_DIR"
-        log "✓ Existing service files removed"
+        log "✓ Existing service template files removed"
     fi
     
     # Clean up any leftover Python path files
@@ -182,68 +182,118 @@ clone_repository() {
     fi
 }
 
-# Install service
-install_service() {
-    log "Installing service to VenusOS"
+# Install service template
+install_service_template() {
+    log "Installing mppsolar service template to VenusOS"
     
     # Create service template directory
     mkdir -p "$SERVICE_TEMPLATE_DIR"
     
-    # Copy service files
-    cp -R "$INSTALL_DIR/service"/* "$SERVICE_TEMPLATE_DIR/"
+    # Copy service template files
+    if [[ -d "$INSTALL_DIR/service-template" ]]; then
+        cp -R "$INSTALL_DIR/service-template"/* "$SERVICE_TEMPLATE_DIR/"
+        log "✓ Service template files copied from repository"
+    else
+        # Create service template files if they don't exist in repo
+        log "Creating service template files..."
+        
+        # Create main run script
+        cat > "$SERVICE_TEMPLATE_DIR/run" << 'EOF'
+#!/bin/sh
+echo "*** starting mppsolar service ***"
+exec 2>&1
+exec /data/etc/dbus-mppsolar/start-dbus-mppsolar.sh $1
+EOF
+        
+        # Create log directory and script
+        mkdir -p "$SERVICE_TEMPLATE_DIR/log"
+        cat > "$SERVICE_TEMPLATE_DIR/log/run" << 'EOF'
+#!/bin/sh
+exec 2>&1
+exec multilog t s25000 n4 /var/log/mppsolar.TTY
+EOF
+        
+        log "✓ Service template files created"
+    fi
     
     # Make service files executable
     chmod +x "$SERVICE_TEMPLATE_DIR/run"
-    chmod +x "$SERVICE_TEMPLATE_DIR/down"
+    chmod +x "$SERVICE_TEMPLATE_DIR/log/run"
     
     # Make main script executable
     chmod +x "$INSTALL_DIR/dbus-mppsolar.py"
     chmod +x "$INSTALL_DIR/start-dbus-mppsolar.sh"
     
-    log "Service installed successfully"
+    # Create log directory
+    mkdir -p /var/log/mppsolar.TTY
+    
+    log "✓ Service template installed successfully"
 }
 
 # Configure serial starter
 configure_serial_starter() {
     log "Configuring serial starter..."
     
-    if [[ ! -f "$SERIAL_STARTER_CONF" ]]; then
-        error "Serial starter configuration file not found: $SERIAL_STARTER_CONF"
-        warn "You may need to manually configure the serial starter"
+    # Create mppsolar.conf in serial-starter directory
+    SERIAL_STARTER_DIR="/opt/victronenergy/serial-starter"
+    if [[ ! -d "$SERIAL_STARTER_DIR" ]]; then
+        error "Serial starter directory not found: $SERIAL_STARTER_DIR"
         return 1
     fi
     
-    # Create backup of original config
-    cp "$SERIAL_STARTER_CONF" "${SERIAL_STARTER_CONF}.backup.$(date +%Y%m%d_%H%M%S)"
+    # Create mppsolar.conf
+    cat > "$SERIAL_STARTER_DIR/mppsolar.conf" << 'EOF'
+# MPP Solar inverter configuration for serial-starter
+# This file maps mppsolar service to dbus-mppsolar
+
+# Map mppsolar service to dbus-mppsolar
+service mppsolar dbus-mppsolar
+
+# Optional: Add specific product mappings if needed
+# product "MPP Solar" mppsolar
+# product "Easun" mppsolar
+# product "SRNE" mppsolar
+EOF
     
-    # Check if mppsolar service is already configured
-    if grep -q "service mppsolar" "$SERIAL_STARTER_CONF"; then
-        log "mppsolar service is already configured in serial starter"
-        return 0
-    fi
+    log "✓ Created mppsolar.conf in serial-starter directory"
     
-    # Add mppsolar service to the services section
-    if grep -q "^service" "$SERIAL_STARTER_CONF"; then
-        # Find the last service line and add mppsolar after it
-        sed -i '/^service/a service mppsolar        dbus-mppsolar' "$SERIAL_STARTER_CONF"
-        log "Added mppsolar service to serial starter configuration"
-    else
-        warn "Could not find services section in serial starter config"
-        warn "You may need to manually add: service mppsolar        dbus-mppsolar"
-    fi
-    
-    # Check if mppsolar is in the default alias
-    if grep -q "alias.*default.*mppsolar" "$SERIAL_STARTER_CONF"; then
-        log "mppsolar is already in default alias"
-    else
-        # Find the default alias line and add mppsolar to it
-        if grep -q "^alias.*default" "$SERIAL_STARTER_CONF"; then
-            sed -i 's/^alias.*default.*/&:mppsolar/' "$SERIAL_STARTER_CONF"
-            log "Added mppsolar to default alias"
+    # Check if mppsolar service is already configured in main serial-starter.conf
+    MAIN_CONF="/etc/venus/serial-starter.conf"
+    if [[ -f "$MAIN_CONF" ]]; then
+        # Create backup of original config
+        cp "$MAIN_CONF" "${MAIN_CONF}.backup.$(date +%Y%m%d_%H%M%S)"
+        
+        # Check if mppsolar service is already configured
+        if grep -q "service mppsolar" "$MAIN_CONF"; then
+            log "mppsolar service is already configured in main serial starter config"
         else
-            warn "Could not find default alias in serial starter config"
-            warn "You may need to manually add mppsolar to the default alias"
+            # Add mppsolar service to the services section
+            if grep -q "^service" "$MAIN_CONF"; then
+                # Find the last service line and add mppsolar after it
+                sed -i '/^service/a service mppsolar        dbus-mppsolar' "$MAIN_CONF"
+                log "✓ Added mppsolar service to main serial starter configuration"
+            else
+                warn "Could not find services section in main serial starter config"
+                warn "You may need to manually add: service mppsolar        dbus-mppsolar"
+            fi
         fi
+        
+        # Check if mppsolar is in the default alias
+        if grep -q "alias.*default.*mppsolar" "$MAIN_CONF"; then
+            log "mppsolar is already in default alias"
+        else
+            # Find the default alias line and add mppsolar to it
+            if grep -q "^alias.*default" "$MAIN_CONF"; then
+                sed -i 's/^alias.*default.*/&:mppsolar/' "$MAIN_CONF"
+                log "✓ Added mppsolar to default alias"
+            else
+                warn "Could not find default alias in main serial starter config"
+                warn "You may need to manually add mppsolar to the default alias"
+            fi
+        fi
+    else
+        warn "Main serial starter config not found: $MAIN_CONF"
+        warn "The mppsolar.conf file should be sufficient for basic operation"
     fi
 }
 
@@ -277,6 +327,7 @@ set_permissions() {
     
     # Set ownership to root
     chown -R root:root "$INSTALL_DIR"
+    chown -R root:root "$SERVICE_TEMPLATE_DIR"
     
     # Set executable permissions
     chmod +x "$INSTALL_DIR/dbus-mppsolar.py"
@@ -284,7 +335,7 @@ set_permissions() {
     
     # Set service permissions
     chmod +x "$SERVICE_TEMPLATE_DIR/run"
-    chmod +x "$SERVICE_TEMPLATE_DIR/down"
+    chmod +x "$SERVICE_TEMPLATE_DIR/log/run"
     
     # Create a Python path configuration file to ensure our modules are used
     log "Configuring Python path for included modules..."
@@ -336,11 +387,19 @@ test_installation() {
         return 1
     fi
     
-    # Check if service files exist
-    if [[ -f "$SERVICE_TEMPLATE_DIR/run" ]] && [[ -f "$SERVICE_TEMPLATE_DIR/down" ]]; then
-        log "✓ Service files are installed"
+    # Check if service template files exist
+    if [[ -f "$SERVICE_TEMPLATE_DIR/run" ]] && [[ -f "$SERVICE_TEMPLATE_DIR/log/run" ]]; then
+        log "✓ Service template files are installed"
     else
-        warn "✗ Service files are missing"
+        warn "✗ Service template files are missing"
+        return 1
+    fi
+    
+    # Check if mppsolar.conf exists
+    if [[ -f "/opt/victronenergy/serial-starter/mppsolar.conf" ]]; then
+        log "✓ Serial starter configuration created"
+    else
+        warn "✗ Serial starter configuration missing"
         return 1
     fi
     
@@ -389,6 +448,31 @@ except ImportError as e:
     fi
 }
 
+# Restart services
+restart_services() {
+    log "Restarting services to pick up changes..."
+    
+    # Restart serial-starter to pick up new configuration
+    if [[ -d "/service/serial-starter" ]]; then
+        log "Restarting serial-starter..."
+        svc -r /service/serial-starter
+        log "✓ Serial-starter restarted"
+    else
+        warn "Serial-starter service not found - may need manual restart"
+    fi
+    
+    # Remove any existing mppsolar service instances
+    for service in /service/dbus-mppsolar.*; do
+        if [[ -d "$service" ]]; then
+            log "Removing existing service instance: $service"
+            svc -d "$service"
+            rm -rf "$service"
+        fi
+    done
+    
+    log "✓ Services restarted and cleaned up"
+}
+
 # Display post-installation information
 show_post_install_info() {
     echo
@@ -396,19 +480,31 @@ show_post_install_info() {
     echo -e "${BLUE}  Installation Completed Successfully!${NC}"
     echo -e "${BLUE}========================================${NC}"
     echo
-    echo -e "${GREEN}Next steps:${NC}"
-    echo "1. Restart VenusOS or reconnect USB-Serial devices"
-    echo "2. Check if the service starts automatically with USB connections"
-    echo "3. Monitor logs at: $SERVICE_TEMPLATE_DIR/log/run"
+    echo -e "${GREEN}What was installed:${NC}"
+    echo "• Main script: $INSTALL_DIR/dbus-mppsolar.py"
+    echo "• Service template: $SERVICE_TEMPLATE_DIR/"
+    echo "• Serial starter config: /opt/victronenergy/serial-starter/mppsolar.conf"
+    echo "• Python modules: velib_python and mpp-solar (included)"
     echo
-    echo -e "${GREEN}Manual configuration (if needed):${NC}"
-    echo "• Edit $SERIAL_STARTER_CONF to add mppsolar service"
-    echo "• Add mppsolar to default alias: alias default mppsolar:gps:vedirect"
+    echo -e "${GREEN}Next steps:${NC}"
+    echo "1. Connect your MPP Solar inverter via USB-Serial"
+    echo "2. The service should start automatically (check logs below)"
+    echo "3. Venus OS should detect the inverter as a Multi/Quattro device"
+    echo
+    echo -e "${GREEN}Monitoring:${NC}"
+    echo "• Service logs: tail -f /var/log/mppsolar.TTY/current"
+    echo "• Serial starter logs: tail -f /var/log/serial-starter/current"
+    echo "• Check for mppsolar detection: grep -i mppsolar /var/log/serial-starter/current"
     echo
     echo -e "${GREEN}Troubleshooting:${NC}"
-    echo "• Check service logs: tail -f $SERVICE_TEMPLATE_DIR/log/run"
-    echo "• Restart service: svc -t $SERVICE_TEMPLATE_DIR"
-    echo "• Check USB device detection: dmesg | grep tty"
+    echo "• Check service status: svstat /service/dbus-mppsolar.ttyUSB0"
+    echo "• Manual test: python3 $INSTALL_DIR/dbus-mppsolar.py --serial /dev/ttyUSB0 --log-level DEBUG"
+    echo "• Restart serial-starter: svc -r /service/serial-starter"
+    echo
+    echo -e "${GREEN}Venus OS Integration:${NC}"
+    echo "• The inverter should appear in the Venus OS dashboard"
+    echo "• DBus service will be available at com.victronenergy.multi.ttyUSB0"
+    echo "• Real-time inverter data will be accessible through DBus"
     echo
     echo -e "${GREEN}Backup location:${NC}"
     echo "• Previous installation backed up to: $BACKUP_DIR"
@@ -429,15 +525,18 @@ main() {
     # Core installation steps
     clean_installation
     clone_repository
-    install_service
+    install_service_template
+    configure_serial_starter
     set_permissions
     
     # Optional steps (won't fail installation)
-    configure_serial_starter || warn "Serial starter configuration failed - may need manual setup"
     check_dependencies || warn "Dependency check failed - check manually"
     
     # Test what we can
     test_installation || warn "Installation test failed - check manually"
+    
+    # Restart services
+    restart_services
     
     # Show completion info
     show_post_install_info

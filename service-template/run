@@ -1,4 +1,4 @@
 #!/bin/sh
-echo "*** starting dbus-mppsolar ***"
+echo "*** starting mppsolar service ***"
 exec 2>&1
 exec /data/etc/dbus-mppsolar/start-dbus-mppsolar.sh $1

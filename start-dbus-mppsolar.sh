@@ -12,4 +12,5 @@
 app=/data/etc/dbus-mppsolar/dbus-mppsolar.py
 
 # Baudrates to use
-start -b 2400 -s /dev/$tty
+args="--baudrate 2400 --serial /dev/$tty"
+start $args
