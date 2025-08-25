@@ -472,8 +472,10 @@ restart_and_start_services() {
     if [[ -d "/service/serial-starter" ]]; then
         log "Restarting serial-starter..."
         # Use the correct svc syntax for this system
+        log "Stopping serial-starter with: svc -d /service/serial-starter"
         svc -d /service/serial-starter
         sleep 2
+        log "Starting serial-starter with: svc -u /service/serial-starter"
         svc -u /service/serial-starter
         log "✓ Serial-starter restarted"
         
