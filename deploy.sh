@@ -356,6 +356,22 @@ EOF
         # Copy .pth file to site-packages
         cp "$PYTHON_PATH_FILE" "$PYTHON_SITE_PACKAGES/"
         log "✓ Python path configured in: $PYTHON_SITE_PACKAGES"
+        
+        # Also create a wrapper script that sets PYTHONPATH explicitly
+        WRAPPER_SCRIPT="$INSTALL_DIR/run-with-path.sh"
+        cat > "$WRAPPER_SCRIPT" << EOF
+#!/bin/bash
+# Wrapper script to run dbus-mppsolar with correct Python path
+export PYTHONPATH="$INSTALL_DIR/velib_python:$INSTALL_DIR/mpp-solar:\$PYTHONPATH"
+exec "$INSTALL_DIR/dbus-mppsolar.py" "\$@"
+EOF
+        chmod +x "$WRAPPER_SCRIPT"
+        
+        # Update the service to use the wrapper for better reliability
+        if [[ -f "$SERVICE_TEMPLATE_DIR/run" ]]; then
+            sed -i 's|exec /data/etc/dbus-mppsolar/start-dbus-mppsolar.sh|exec /data/etc/dbus-mppsolar/run-with-path.sh|' "$SERVICE_TEMPLATE_DIR/run"
+            log "✓ Updated service to use Python path wrapper"
+        fi
     else
         # Alternative: create a wrapper script that sets PYTHONPATH
         WRAPPER_SCRIPT="$INSTALL_DIR/run-with-path.sh"
@@ -369,7 +385,7 @@ EOF
         
         # Update the service to use the wrapper
         if [[ -f "$SERVICE_TEMPLATE_DIR/run" ]]; then
-            sed -i 's|exec /data/etc/dbus-mppsolar/dbus-mppsolar.py|exec /data/etc/dbus-mppsolar/run-with-path.sh|' "$SERVICE_TEMPLATE_DIR/run"
+            sed -i 's|exec /data/etc/dbus-mppsolar/start-dbus-mppsolar.sh|exec /data/etc/dbus-mppsolar/run-with-path.sh|' "$SERVICE_TEMPLATE_DIR/run"
             log "✓ Updated service to use Python path wrapper"
         fi
     fi
@@ -455,7 +471,10 @@ restart_and_start_services() {
     # Restart serial-starter to pick up new configuration
     if [[ -d "/service/serial-starter" ]]; then
         log "Restarting serial-starter..."
-        svc -r /service/serial-starter
+        # Use the correct svc syntax for this system
+        svc -d /service/serial-starter
+        sleep 2
+        svc -u /service/serial-starter
         log "✓ Serial-starter restarted"
         
         # Wait for serial-starter to fully restart
