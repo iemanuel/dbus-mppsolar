@@ -1195,7 +1195,7 @@ class DbusMppSolarService(object):
                     runInverterCommands(['PCP01', 'POP02'], self._invProtocol)  # Solar first, SBU
                 elif value == 4:  # Off
                     runInverterCommands(['PCP02'], self._invProtocol)  # Solar only
-            self._queued_updates.append((path, value))
+                self._queued_updates.append((path, value))
 
             elif path == '/Ac/In/1/CurrentLimit':
                 try:
